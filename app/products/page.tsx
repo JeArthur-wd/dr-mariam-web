@@ -1,5 +1,5 @@
-import Link from 'next/link'
-import { ArrowLeft, Sparkles } from 'lucide-react'
+import { Sparkles } from 'lucide-react'
+import { BackLink } from '../../components/back-link'
 import { SiteFooter, SiteHeader } from '../../components/site-shell'
 import { products, whatsappLink } from '../../lib/site-data'
 
@@ -9,9 +9,7 @@ export default function ProductsPage() {
       <SiteHeader />
       <main className="page-main">
         <section className="page-hero compact-hero">
-          <Link className="back-link" href="/">
-            <ArrowLeft size={17} /> Back to Home
-          </Link>
+          <BackLink fallbackHref="/" />
           <div className="eyebrow">PRODUCTS</div>
           <h1>Explore our wellness and skincare products</h1>
         </section>

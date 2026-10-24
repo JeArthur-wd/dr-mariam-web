@@ -1,5 +1,5 @@
-import Link from 'next/link'
-import { ArrowLeft, BookOpenText } from 'lucide-react'
+import { BookOpenText } from 'lucide-react'
+import { BackLink } from '../../components/back-link'
 import { SiteFooter, SiteHeader } from '../../components/site-shell'
 import { books, whatsappLink } from '../../lib/site-data'
 
@@ -9,9 +9,7 @@ export default function BooksPage() {
       <SiteHeader />
       <main className="page-main">
         <section className="page-hero compact-hero">
-          <Link className="back-link" href="/">
-            <ArrowLeft size={17} /> Back to Home
-          </Link>
+          <BackLink fallbackHref="/" />
           <div className="eyebrow">BOOKS</div>
           <h1>Explore our available books</h1>
         </section>

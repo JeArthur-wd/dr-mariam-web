@@ -5,6 +5,7 @@ import { useRouter } from 'next/navigation'
 import { useState } from 'react'
 import { UserPlus } from 'lucide-react'
 import { registerAdmin, saveAdminSession } from '../../../lib/user-auth'
+import { BackLink } from '../../../components/back-link'
 
 export default function AdminSignupPage() {
   const router = useRouter()
@@ -50,6 +51,7 @@ export default function AdminSignupPage() {
   return (
     <div className="planner-shell">
       <div className="planner-login-card user-auth-card">
+        <BackLink fallbackHref="/" />
         <div className="planner-login-brand">
           <div className="planner-badge"><UserPlus size={20} /></div>
           <div>

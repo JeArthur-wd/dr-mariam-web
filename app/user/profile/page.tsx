@@ -3,7 +3,8 @@
 import Link from 'next/link'
 import { useRouter } from 'next/navigation'
 import { useEffect, useState } from 'react'
-import { ArrowLeft, LogOut, Mail, ShieldCheck } from 'lucide-react'
+import { LogOut, Mail, ShieldCheck } from 'lucide-react'
+import { BackLink } from '../../../components/back-link'
 import { SiteFooter, SiteHeader } from '../../../components/site-shell'
 import { clearSession, fetchCurrentMember, logoutMember, readSession, USER_SESSION_EVENT, type UserSession } from '../../../lib/user-auth'
 
@@ -94,9 +95,7 @@ export default function UserProfilePage() {
       <SiteHeader />
 
       <main className="page-main user-profile-shell">
-        <Link href="/user" className="back-link">
-          <ArrowLeft size={16} /> Back to dashboard
-        </Link>
+        <BackLink fallbackHref="/user" />
 
         <section className="user-profile-card">
           <div className="user-profile-header">

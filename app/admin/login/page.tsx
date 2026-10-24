@@ -5,6 +5,7 @@ import { useRouter } from 'next/navigation'
 import { useState } from 'react'
 import { LockKeyhole, ShieldCheck } from 'lucide-react'
 import { loginAdmin, saveAdminSession } from '../../../lib/user-auth'
+import { BackLink } from '../../../components/back-link'
 
 export default function AdminLoginPage() {
   const router = useRouter()
@@ -32,6 +33,7 @@ export default function AdminLoginPage() {
   return (
     <div className="planner-shell">
       <div className="planner-login-card user-auth-card">
+        <BackLink fallbackHref="/" />
         <div className="planner-login-brand">
           <div className="planner-badge"><ShieldCheck size={20} /></div>
           <div>

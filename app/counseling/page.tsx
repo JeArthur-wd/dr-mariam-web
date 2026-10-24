@@ -1,5 +1,5 @@
-import Link from 'next/link'
-import { ArrowLeft, CheckCircle2, HeartHandshake, Sparkles } from 'lucide-react'
+import { CheckCircle2, HeartHandshake, Sparkles } from 'lucide-react'
+import { BackLink } from '../../components/back-link'
 import { SiteFooter, SiteHeader } from '../../components/site-shell'
 import { whatsappLink } from '../../lib/site-data'
 
@@ -22,9 +22,7 @@ export default function CounselingPage() {
       <SiteHeader />
       <main className="page-main">
         <section className="page-hero compact-hero">
-          <Link className="back-link" href="/">
-            <ArrowLeft size={17} /> Back to Home
-          </Link>
+          <BackLink fallbackHref="/" />
           <div className="eyebrow">COUNSELING</div>
           <h1>Choose the counseling option that applies to you.</h1>
         </section>

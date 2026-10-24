@@ -1,5 +1,5 @@
-import Link from 'next/link'
-import { ArrowLeft, CheckCircle2, ShieldCheck, Users } from 'lucide-react'
+import { CheckCircle2, ShieldCheck, Users } from 'lucide-react'
+import { BackLink } from '../../components/back-link'
 import { SiteFooter, SiteHeader } from '../../components/site-shell'
 import { whatsappLink } from '../../lib/site-data'
 
@@ -9,9 +9,7 @@ export default function ForumPage() {
       <SiteHeader />
       <main className="page-main">
         <section className="page-hero compact-hero">
-          <Link className="back-link" href="/">
-            <ArrowLeft size={17} /> Back to Home
-          </Link>
+          <BackLink fallbackHref="/" />
           <div className="eyebrow">SINGLES FORUM</div>
           <h1>Join our Private Forum</h1>
         </section>
