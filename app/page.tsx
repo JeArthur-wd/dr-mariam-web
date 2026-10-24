@@ -1,7 +1,8 @@
 import Link from 'next/link'
 import { ArrowRight, MessageSquareText } from 'lucide-react'
+import { HeroSlider } from '../components/hero-slider'
 import { SiteFooter, SiteHeader } from '../components/site-shell'
-import { serviceCards } from '../lib/site-data'
+import { heroSlides, serviceCards } from '../lib/site-data'
 
 export default function HomePage() {
   return (
@@ -9,7 +10,7 @@ export default function HomePage() {
       <SiteHeader />
 
       <main className="page-main landing-page">
-        <section className="page-hero home-hero">
+        <HeroSlider slides={heroSlides} className="page-hero home-hero">
           <div className="hero-pill">For women seeking clarity, connection and renewal</div>
           <h1>Choose the support that fits your season.</h1>
           <p>Care, clarity, community and tools for your wellness journey.</p>
@@ -37,7 +38,7 @@ export default function HomePage() {
               <span>Practical tools</span>
             </div>
           </div>
-        </section>
+        </HeroSlider>
 
         <section className="service-grid">
           {serviceCards.map(({ title, description, href, icon: Icon }) => (

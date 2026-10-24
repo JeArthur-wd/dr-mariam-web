@@ -64,6 +64,13 @@ export const eventDetails = {
   ],
 } as const
 
+export const heroSlides = [
+  { src: '/images/hero-dr-mariam.jpg', alt: 'Dr Mariam Nagujja', position: 'center 22%' },
+  { src: '/images/hero-convention-speakers.jpg', alt: 'Speakers at The Ladies Guide Convention 2026', position: 'center 35%' },
+  { src: '/images/hero-convention-cake.jpg', alt: 'Cake cutting at The Ladies Guide Convention 2026', position: 'center 45%' },
+  { src: '/images/hero-convention-group.jpg', alt: 'Guests at The Ladies Guide Convention 2026', position: 'center 55%' },
+] as const
+
 export const contactLinks = [
   { label: '0772-831-057', href: 'https://wa.me/256772831057' },
   { label: '0756-831-057', href: 'https://wa.me/256756831057' },
