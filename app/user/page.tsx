@@ -21,8 +21,8 @@ const defaultEventData: EventDetails = {
   time: '4:30 PM',
   dressCode: 'Black, Red, White & Pink',
   ticketOptions: [
-    { label: 'Early Bird', price: 'UGX 150,000', highlight: true },
-    { label: 'Late Ticket', price: 'UGX 200,000', highlight: false },
+    { id: null, label: 'Early Bird', price: 'UGX 150,000', amount: 150000, highlight: true },
+    { id: null, label: 'Late Ticket', price: 'UGX 200,000', amount: 200000, highlight: false },
   ],
 }
 
@@ -192,8 +192,8 @@ export default function UserDashboardPage() {
 
             <div className="side-spotlight">
               <span className="spotlight-kicker">Featured</span>
-              <h3>Singles to Mingle</h3>
-              <p>27 November 2026 · Sheraton Hotel</p>
+              <h3>{eventData.title}</h3>
+              <p>{eventData.date} · {eventData.venue}</p>
               <Link href="/event" className="secondary-button full-width-button">View event</Link>
             </div>
 

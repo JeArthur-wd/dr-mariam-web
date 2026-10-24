@@ -13,37 +13,54 @@ export type UserSession = {
   token?: string
 }
 
+export type TicketOption = {
+  id: number | null
+  label: string
+  price: string
+  amount: number
+  highlight: boolean
+  codePrefix?: string
+  sold?: number
+}
+
 export type EventDetails = {
+  id?: number | null
   title: string
   date: string
   venue: string
   time: string
   dressCode: string
-  ticketOptions: Array<{
-    label: string
-    price: string
-    highlight: boolean
-  }>
+  capacity?: number
+  ticketsRemaining?: number
+  ticketOptions: TicketOption[]
 }
+
+export type MobileMoneyNetwork = 'MTN Mobile Money' | 'Airtel Money'
 
 export type UserAccount = UserSession & {
   password: string
 }
 
 export type ReservationTicket = {
+  guestName: string
   ticketCode: string
   qrPayload: string
+  checkedIn: boolean
+  checkedInAt: string | null
 }
 
 export type ReservationPayload = {
   id: number
   fullName: string
   email: string
+  eventTitle: string
   ticketType: string
-  status: 'pending' | 'paid' | 'confirmed' | 'failed'
+  quantity: number
+  totalAmount: string
+  status: 'pending' | 'paid' | 'confirmed' | 'checked_in' | 'failed'
   paymentMethod: string
   emailSent: boolean
-  ticket: ReservationTicket
+  tickets: ReservationTicket[]
 }
 
 export type ReservationResponse = {
@@ -253,7 +270,16 @@ export async function logoutMember() {
   clearSession()
 }
 
-export async function reserveTicket(payload: Record<string, string>): Promise<ReservationResponse> {
+export async function reserveTicket(payload: {
+  fullName: string
+  email: string
+  phone: string
+  ticketTypeId: number
+  quantity: number
+  guestNames: string[]
+  paymentMethod: MobileMoneyNetwork
+  paymentPhone: string
+}): Promise<ReservationResponse> {
   const session = readSession()
   if (!session?.token) {
     throw new Error('Member login required to reserve a ticket.')
@@ -270,11 +296,8 @@ export async function reserveTicket(payload: Record<string, string>): Promise<Re
 
 export async function initiatePayment(payload: {
   reservationId: number
-  fullName: string
   phoneNumber: string
-  ticketType: string
-  amount: string
-  paymentMethod: 'MTN Mobile Money' | 'Airtel Money'
+  paymentMethod: MobileMoneyNetwork
 }) {
   const session = readSession()
   if (!session?.token) {
@@ -303,4 +326,5 @@ export async function fetchReservation(reservationId: number) {
     },
   })
 }
+
 

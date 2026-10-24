@@ -1,78 +1,53 @@
 'use client'
 
-import Link from 'next/link'
 import { useRouter } from 'next/navigation'
 import { useEffect, useState } from 'react'
 import QRCode from 'qrcode'
-import { ArrowLeft, CalendarDays, Check, Clock3, MapPin, MessageCircle, Shirt, Ticket, X, Zap } from 'lucide-react'
+import { CalendarDays, Check, Clock3, MapPin, MessageCircle, Minus, Plus, Shirt, Ticket, X, Zap } from 'lucide-react'
+import { BackLink } from '../../components/back-link'
+import { MobileMoneyMark } from '../../components/mobile-money-mark'
 import { SiteFooter, SiteHeader } from '../../components/site-shell'
 import { contactLinks, whatsappLink } from '../../lib/site-data'
-import { fetchCurrentMember, fetchEventDetails, fetchReservation, initiatePayment, readSession, reserveTicket, type EventDetails, type ReservationPayload, type UserSession } from '../../lib/user-auth'
+import { fetchCurrentMember, fetchEventDetails, fetchReservation, initiatePayment, readSession, reserveTicket, type EventDetails, type MobileMoneyNetwork, type ReservationPayload, type TicketOption, type UserSession } from '../../lib/user-auth'
 
-type ReservationDraft = {
-  fullName: string
-  phone: string
-  email: string
+const MAX_TICKETS = 10
+const NETWORKS: MobileMoneyNetwork[] = ['MTN Mobile Money', 'Airtel Money']
+const PAID = ['paid', 'confirmed', 'checked_in']
+
+type Step = 'details' | 'payment' | 'done'
+
+function formatUgx(amount: number) {
+  return `UGX ${amount.toLocaleString('en-US')}`
 }
 
 export default function EventPage() {
   const router = useRouter()
   const [user, setUser] = useState<UserSession | null>(null)
-  const [eventData, setEventData] = useState<EventDetails>({
-    title: 'Singles to Mingle 2026',
-    date: '27 November 2026',
-    venue: 'Sheraton Hotel',
-    time: '4:30 PM',
-    dressCode: 'Black, Red, White & Pink',
-    ticketOptions: [
-      { label: 'Early Bird', price: 'UGX 150,000', highlight: true },
-      { label: 'Late Ticket', price: 'UGX 200,000', highlight: false },
-    ],
-  })
+  const [eventData, setEventData] = useState<EventDetails | null>(null)
   const [checkingAccess, setCheckingAccess] = useState(true)
-  const [modalOpen, setModalOpen] = useState(false)
-  const [checkoutOpen, setCheckoutOpen] = useState(false)
-  const [submitted, setSubmitted] = useState(false)
-  const [ticketType, setTicketType] = useState('Early Bird — UGX 150,000')
-  const [paymentMethod, setPaymentMethod] = useState<'MTN Mobile Money' | 'Airtel Money'>('MTN Mobile Money')
-  const [reservation, setReservation] = useState<ReservationDraft | null>(null)
-  const [paymentError, setPaymentError] = useState('')
-  const [isPaying, setIsPaying] = useState(false)
-  const [ticketInfo, setTicketInfo] = useState<ReservationPayload | null>(null)
-  const [qrCodeDataUrl, setQrCodeDataUrl] = useState('')
+  const [selectedTicketId, setSelectedTicketId] = useState<number | null>(null)
+  const [step, setStep] = useState<Step | null>(null)
+  const [quantity, setQuantity] = useState(1)
+  const [guestNames, setGuestNames] = useState<string[]>([''])
+  const [contact, setContact] = useState({ email: '', phone: '' })
+  const [network, setNetwork] = useState<MobileMoneyNetwork>('MTN Mobile Money')
+  const [paymentPhone, setPaymentPhone] = useState('')
+  const [formError, setFormError] = useState('')
+  const [isSubmitting, setIsSubmitting] = useState(false)
+  const [order, setOrder] = useState<ReservationPayload | null>(null)
+  const [qrCodes, setQrCodes] = useState<Record<string, string>>({})
 
-  useEffect(() => {
-    if (!ticketInfo?.ticket.qrPayload || !['paid', 'confirmed'].includes(ticketInfo.status)) {
-      setQrCodeDataUrl('')
-      return
-    }
-
-    QRCode.toDataURL(ticketInfo.ticket.qrPayload)
-      .then((dataUrl: string) => setQrCodeDataUrl(dataUrl))
-      .catch(() => setQrCodeDataUrl(''))
-  }, [ticketInfo])
-
-  useEffect(() => {
-    if (!ticketInfo || ticketInfo.status !== 'pending') return
-
-    const interval = window.setInterval(async () => {
-      try {
-        const response = await fetchReservation(ticketInfo.id)
-        setTicketInfo(response.reservation)
-      } catch {
-        // Keep checking while the payment provider completes the transaction.
-      }
-    }, 5000)
-
-    return () => window.clearInterval(interval)
-  }, [ticketInfo])
+  const ticketOptions = eventData?.ticketOptions ?? []
+  const onSale = Boolean(eventData?.id) && ticketOptions.some((option) => option.id !== null)
+  const selectedTicket: TicketOption | undefined = ticketOptions.find((option) => option.id === selectedTicketId) ?? ticketOptions[0]
+  const remaining = eventData?.ticketsRemaining ?? MAX_TICKETS
+  const maxQuantity = Math.max(Math.min(MAX_TICKETS, remaining), 1)
+  const total = (selectedTicket?.amount ?? 0) * quantity
+  const orderPaid = order ? PAID.includes(order.status) : false
 
   useEffect(() => {
     async function verifyAccess() {
-      const activeUser = readSession()
-      if (!activeUser?.token) {
-        setUser(null)
-        setCheckingAccess(false)
+      if (!readSession()?.token) {
         router.replace('/user/login')
         return
       }
@@ -80,47 +55,61 @@ export default function EventPage() {
       try {
         const backendUser = await fetchCurrentMember()
         if (!backendUser) {
-          setUser(null)
-          setCheckingAccess(false)
           router.replace('/user/login')
           return
         }
-
-        setUser({
-          fullName: backendUser.fullName,
-          email: backendUser.email,
-          token: backendUser.token,
-        })
+        setUser({ fullName: backendUser.fullName, email: backendUser.email, token: backendUser.token })
       } catch {
-        setUser(null)
-        setCheckingAccess(false)
         router.replace('/user/login')
         return
       }
 
       try {
-        const eventResponse = await fetchEventDetails()
-        if (eventResponse) {
-          setEventData(eventResponse)
-        }
+        const details = await fetchEventDetails()
+        setEventData(details)
+        setSelectedTicketId(details.ticketOptions.find((option) => option.highlight)?.id ?? details.ticketOptions[0]?.id ?? null)
       } catch {
-        // Keep the static fallback event if the backend is unavailable.
+        setEventData(null)
       }
-
       setCheckingAccess(false)
     }
 
-    verifyAccess()
+    void verifyAccess()
   }, [router])
 
-  if (checkingAccess) {
+  // Keep checking while the member approves the mobile money prompt.
+  useEffect(() => {
+    if (!order || order.status !== 'pending' || step !== 'done') return
+    const interval = window.setInterval(async () => {
+      try {
+        const response = await fetchReservation(order.id)
+        setOrder(response.reservation)
+      } catch {
+        // The provider may still be processing; try again on the next tick.
+      }
+    }, 5000)
+    return () => window.clearInterval(interval)
+  }, [order, step])
+
+  useEffect(() => {
+    if (!order || !PAID.includes(order.status)) {
+      setQrCodes({})
+      return
+    }
+    let cancelled = false
+    Promise.all(order.tickets.map(async (ticket) => [ticket.ticketCode, await QRCode.toDataURL(ticket.qrPayload, { width: 360, margin: 1, color: { dark: '#3c1730', light: '#ffffff' } })] as const))
+      .then((entries) => { if (!cancelled) setQrCodes(Object.fromEntries(entries)) })
+      .catch(() => { if (!cancelled) setQrCodes({}) })
+    return () => { cancelled = true }
+  }, [order])
+
+  if (checkingAccess || !user) {
     return (
       <div className="site-shell">
         <SiteHeader />
         <main className="page-main user-auth-gate">
           <section className="user-auth-card user-gate-card">
-            <div className="eyebrow">ACCESS REQUIRED</div>
-            <h1>Checking member access...</h1>
+            <h1>Checking member access…</h1>
             <p>Please wait while we verify your account before you can view the event.</p>
           </section>
         </main>
@@ -129,76 +118,68 @@ export default function EventPage() {
     )
   }
 
-  if (!user) {
-    return null
+  function changeQuantity(next: number) {
+    const clamped = Math.min(Math.max(next, 1), maxQuantity)
+    setQuantity(clamped)
+    setGuestNames((names) => Array.from({ length: clamped }, (_, index) => names[index] ?? ''))
   }
 
-  function openReservation() {
-    setSubmitted(false)
-    setPaymentError('')
-    setTicketInfo(null)
-    setReservation(null)
-    setModalOpen(true)
+  function openReservation(ticketId?: number | null) {
+    if (ticketId !== undefined) setSelectedTicketId(ticketId)
+    setQuantity(1)
+    setGuestNames([user?.fullName ?? ''])
+    setContact({ email: user?.email ?? '', phone: '' })
+    setOrder(null)
+    setFormError('')
+    setStep('details')
   }
 
-  async function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
+  function closeModal() {
+    setStep(null)
+    setFormError('')
+  }
+
+  function continueToPayment(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault()
-    const form = new FormData(event.currentTarget)
-    const selectedTicket = String(form.get('ticket') || 'Early Bird — UGX 150,000')
-    setReservation({
-      fullName: String(form.get('name') || user?.fullName || '').trim(),
-      phone: String(form.get('phone') || '').trim(),
-      email: String(form.get('email') || user?.email || '').trim(),
-    })
-    setTicketType(selectedTicket)
-    setPaymentError('')
-    setModalOpen(false)
-    setCheckoutOpen(true)
+    if (guestNames.some((name) => !name.trim())) {
+      setFormError('Enter a name for every ticket. Each guest’s name is printed in their QR code.')
+      return
+    }
+    setPaymentPhone((current) => current || contact.phone)
+    setFormError('')
+    setStep('payment')
   }
 
   async function completePayment(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault()
-    const form = new FormData(event.currentTarget)
-    const paymentPhone = String(form.get('paymentPhone') || '')
-    const selectedMethod = paymentMethod
-    const fullName = reservation?.fullName || user?.fullName || ''
-    const phone = reservation?.phone || paymentPhone
-    const email = reservation?.email || user?.email || ''
-
-    setPaymentError('')
-    setIsPaying(true)
+    if (!selectedTicket?.id || !user) return
+    setFormError('')
+    setIsSubmitting(true)
 
     try {
-      let activeReservation = ticketInfo
-      if (!activeReservation) {
-        const reservationResponse = await reserveTicket({
-          fullName,
-          phone,
-          email,
-          ticketType,
-          paymentMethod: selectedMethod,
+      // Reuse the reservation if only the payment step failed, so a retry does not book twice.
+      let activeOrder = order
+      if (!activeOrder) {
+        const response = await reserveTicket({
+          fullName: user.fullName,
+          email: contact.email.trim(),
+          phone: contact.phone.trim(),
+          ticketTypeId: selectedTicket.id,
+          quantity,
+          guestNames: guestNames.map((name) => name.trim()),
+          paymentMethod: network,
           paymentPhone,
         })
-        activeReservation = reservationResponse.reservation
-        setTicketInfo(activeReservation)
+        activeOrder = response.reservation
+        setOrder(activeOrder)
       }
 
-      await initiatePayment({
-        reservationId: activeReservation.id,
-        fullName,
-        phoneNumber: paymentPhone,
-        ticketType: ticketType,
-        amount: ticketType.replace(/[^0-9]/g, ''),
-        paymentMethod: selectedMethod,
-      })
-
-      setCheckoutOpen(false)
-      setSubmitted(true)
-      setModalOpen(true)
+      await initiatePayment({ reservationId: activeOrder.id, phoneNumber: paymentPhone, paymentMethod: network })
+      setStep('done')
     } catch (error) {
-      setPaymentError(error instanceof Error ? error.message : 'We could not send your payment request. Please try again.')
+      setFormError(error instanceof Error ? error.message : 'We could not send your payment request. Please try again.')
     } finally {
-      setIsPaying(false)
+      setIsSubmitting(false)
     }
   }
 
@@ -207,122 +188,175 @@ export default function EventPage() {
       <SiteHeader />
 
       <main className="page-main event-page-main">
+        <BackLink fallbackHref="/user" />
+
         <section className="event-intro" id="event">
           <div className="eyebrow">THE ULTIMATE SINGLES EXPERIENCE</div>
-          <h1>{eventData.title}</h1>
-          <p className="intro-copy">Reserve your place today</p>
+          <h1>{eventData?.title ?? 'Singles Event'}</h1>
+          <p className="intro-copy">{onSale ? 'Choose your ticket and reserve your place.' : 'Tickets are not on sale yet. Check back soon.'}</p>
         </section>
 
         <section className="event-layout" aria-label="Event details">
           <div className="poster-wrap">
             <div className="poster-glow" />
-            <img src="/event-poster.jpg" alt={eventData.title} className="poster" />
+            <img src="/event-poster.jpg" alt={eventData?.title ?? 'Event poster'} className="poster" />
           </div>
           <div className="details-column">
-            <div className="details-card">
-              <div className="detail-item"><span className="detail-icon"><CalendarDays size={20} /></span><div><span className="detail-label">DATE</span><strong>{eventData.date}</strong></div></div>
-              <div className="detail-item"><span className="detail-icon"><MapPin size={20} /></span><div><span className="detail-label">VENUE</span><strong>{eventData.venue}</strong></div></div>
-              <div className="detail-item"><span className="detail-icon"><Clock3 size={20} /></span><div><span className="detail-label">TIME</span><strong>{eventData.time}</strong></div></div>
-              <div className="detail-item"><span className="detail-icon"><Shirt size={20} /></span><div><span className="detail-label">DRESS CODE</span><strong>{eventData.dressCode}</strong></div></div>
-            </div>
+            {eventData ? (
+              <div className="details-card">
+                <div className="detail-item"><span className="detail-icon"><CalendarDays size={20} /></span><div><span className="detail-label">DATE</span><strong>{eventData.date}</strong></div></div>
+                <div className="detail-item"><span className="detail-icon"><MapPin size={20} /></span><div><span className="detail-label">VENUE</span><strong>{eventData.venue}</strong></div></div>
+                <div className="detail-item"><span className="detail-icon"><Clock3 size={20} /></span><div><span className="detail-label">TIME</span><strong>{eventData.time}</strong></div></div>
+                <div className="detail-item"><span className="detail-icon"><Shirt size={20} /></span><div><span className="detail-label">DRESS CODE</span><strong>{eventData.dressCode}</strong></div></div>
+              </div>
+            ) : (
+              <div className="form-error" role="alert"><p>We could not load the event details. Please refresh the page.</p></div>
+            )}
 
-            <div className="ticket-heading"><Ticket size={20} /> <h2>Ticket Prices</h2></div>
-            <div className="ticket-grid">
-              {eventData.ticketOptions.map((ticket) => (
-                <article key={ticket.label} className={ticket.highlight ? 'ticket-card featured' : 'ticket-card'}>
-                  <div className="ticket-badge">
-                    {ticket.highlight ? <Zap size={13} fill="currentColor" /> : <Clock3 size={13} />} {ticket.label.toUpperCase()}
-                  </div>
-                  <span className="ticket-caption">{ticket.highlight ? 'BEST VALUE' : 'STANDARD'}</span>
-                  <span className="currency">UGX</span>
-                  <strong className="price">{ticket.price.replace('UGX ', '')}</strong>
-                  <p>{ticket.highlight ? 'Limited slots available' : 'Available until the event'}</p>
-                </article>
-              ))}
+            <div className="ticket-heading"><Ticket size={20} /> <h2>Choose a ticket</h2></div>
+            <div className="ticket-grid" role="radiogroup" aria-label="Ticket type">
+              {ticketOptions.map((ticket) => {
+                const isSelected = onSale && ticket.id === selectedTicket?.id
+                return (
+                  <button
+                    key={ticket.id ?? ticket.label}
+                    type="button"
+                    role="radio"
+                    aria-checked={isSelected}
+                    disabled={!onSale}
+                    className={`ticket-card ticket-option${ticket.highlight ? ' featured' : ''}${isSelected ? ' selected' : ''}`}
+                    onClick={() => setSelectedTicketId(ticket.id)}
+                  >
+                    <span className="ticket-badge">
+                      {ticket.highlight ? <Zap size={13} fill="currentColor" /> : <Clock3 size={13} />} {ticket.label.toUpperCase()}
+                    </span>
+                    <span className="ticket-check" aria-hidden="true">{isSelected ? <Check size={14} /> : null}</span>
+                    <span className="currency">UGX</span>
+                    <strong className="price">{ticket.price.replace('UGX ', '')}</strong>
+                  </button>
+                )
+              })}
             </div>
-            <button className="reserve-button" onClick={openReservation}><Ticket size={18} /> Reserve Your Place</button>
+            {onSale && remaining <= 20 ? <p className="tickets-left">{remaining > 0 ? `Only ${remaining} ticket${remaining === 1 ? '' : 's'} left` : 'Sold out'}</p> : null}
+            <button className="reserve-button" onClick={() => openReservation()} disabled={!onSale || remaining <= 0}>
+              <Ticket size={18} /> {onSale ? `Reserve ${selectedTicket?.label ?? 'ticket'}` : 'Tickets coming soon'}
+            </button>
           </div>
         </section>
 
         <section className="help-card">
           <div className="help-icon"><MessageCircle size={24} /></div>
           <div><h2>Need More Help?</h2><p>Contact us directly and we&apos;ll be happy to assist you.</p></div>
-          <div className="contact-links">{contactLinks.map((contact) => (
-            <a key={contact.label} href={contact.href}><MessageCircle size={17} /> {contact.label}</a>
+          <div className="contact-links">{contactLinks.map((contactLink) => (
+            <a key={contactLink.label} href={contactLink.href}><MessageCircle size={17} /> {contactLink.label}</a>
           ))}</div>
         </section>
       </main>
 
       <SiteFooter />
 
-      {modalOpen && (
-        <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.currentTarget === event.target) setModalOpen(false) }}>
-          <div className="modal" role="dialog" aria-modal="true" aria-labelledby="reserve-title">
-            <button className="modal-close" onClick={() => setModalOpen(false)} aria-label="Close dialog"><X size={20} /></button>
-            {submitted ? (
-              <div className="success-state" style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
-                <div className="success-icon"><Check size={28} /></div>
-                <h2>{ticketInfo && ['paid', 'confirmed'].includes(ticketInfo.status) ? 'Your ticket is confirmed' : 'Payment request sent'}</h2>
-                <p>{ticketInfo && ['paid', 'confirmed'].includes(ticketInfo.status) ? `Your ticket has been emailed to ${ticketInfo.email}.` : 'Approve the payment prompt on your phone. Your ticket will be emailed automatically after the provider confirms payment.'}</p>
+      {step && selectedTicket ? (
+        <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.currentTarget === event.target && step !== 'payment') closeModal() }}>
+          <div className="modal reserve-modal" role="dialog" aria-modal="true" aria-labelledby="reserve-title">
+            <button className="modal-close" onClick={closeModal} aria-label="Close dialog"><X size={20} /></button>
 
-                {ticketInfo && ['paid', 'confirmed'].includes(ticketInfo.status) && (
-                  <div style={{ display: 'grid', gap: '1rem', padding: '1rem', border: '1px solid rgba(255,255,255,0.1)', borderRadius: '18px', background: 'rgba(255,255,255,0.03)' }}>
-                    {qrCodeDataUrl ? (
-                      <img src={qrCodeDataUrl} alt="Event ticket QR code" style={{ width: '180px', height: '180px', margin: '0 auto', background: '#fff', borderRadius: '14px', padding: '0.75rem' }} />
-                    ) : (
-                      <div style={{ width: '180px', height: '180px', margin: '0 auto', borderRadius: '14px', display: 'grid', placeItems: 'center', background: '#fff', color: '#1d1b2e', fontWeight: 700 }}>QR</div>
-                    )}
+            {step === 'details' ? (
+              <>
+                <h2 id="reserve-title">Reserve your tickets</h2>
+                <form onSubmit={continueToPayment}>
+                  <label>Ticket type
+                    <select value={selectedTicket.id ?? ''} onChange={(event) => setSelectedTicketId(Number(event.target.value))}>
+                      {ticketOptions.map((ticket) => <option key={ticket.id} value={ticket.id ?? ''}>{ticket.label} — {ticket.price}</option>)}
+                    </select>
+                  </label>
 
-                    <div style={{ display: 'grid', gap: '0.35rem', textAlign: 'left' }}>
-                      <strong>{ticketInfo.fullName}</strong>
-                      <span>{ticketInfo.email}</span>
-                      <span>{ticketInfo.ticketType}</span>
-                      <span>Ticket code: {ticketInfo.ticket.ticketCode}</span>
+                  <div className="quantity-row">
+                    <span id="quantity-label">Number of tickets</span>
+                    <div className="quantity-stepper" role="group" aria-labelledby="quantity-label">
+                      <button type="button" onClick={() => changeQuantity(quantity - 1)} disabled={quantity <= 1} aria-label="Remove a ticket"><Minus size={16} /></button>
+                      <output aria-live="polite">{quantity}</output>
+                      <button type="button" onClick={() => changeQuantity(quantity + 1)} disabled={quantity >= maxQuantity} aria-label="Add a ticket"><Plus size={16} /></button>
                     </div>
                   </div>
-                )}
 
-                <button className="reserve-button" onClick={() => setModalOpen(false)}>Done</button>
-              </div>
-            ) : (
-              <>
-                <div className="modal-kicker">SECURE YOUR PLACE</div>
-                <h2 id="reserve-title">Reserve your ticket</h2>
-                <p className="modal-copy">Enter your details to continue to mobile money payment.</p>
-                <form onSubmit={handleSubmit}>
-                  <label>Full name<input required name="name" defaultValue={user.fullName} placeholder="Your full name" /></label>
-                  <label>Email address<input required name="email" type="email" defaultValue={user.email} placeholder="you@example.com" /></label>
-                  <label>Phone number<input required name="phone" type="tel" inputMode="tel" placeholder="+256 700 000 000" /></label>
-                  <label>Ticket type<select name="ticket" defaultValue={ticketType}>{eventData.ticketOptions.map((ticket) => <option key={ticket.label} value={`${ticket.label} — ${ticket.price}`}>{ticket.label} — {ticket.price}</option>)}</select></label>
-                  <button className="reserve-button" type="submit">Continue to Payment</button>
+                  <fieldset className="guest-names">
+                    <legend>Name on each ticket</legend>
+                    {guestNames.map((name, index) => (
+                      <label key={index}>
+                        <span>Ticket {index + 1}{index === 0 ? ' (you)' : ''}</span>
+                        <input
+                          required
+                          value={name}
+                          onChange={(event) => setGuestNames((names) => names.map((current, position) => (position === index ? event.target.value : current)))}
+                          placeholder="Guest full name"
+                          autoComplete={index === 0 ? 'name' : 'off'}
+                        />
+                      </label>
+                    ))}
+                  </fieldset>
+
+                  <label>Email for your tickets<input required type="email" value={contact.email} onChange={(event) => setContact((current) => ({ ...current, email: event.target.value }))} placeholder="you@example.com" /></label>
+                  <label>Phone number<input required type="tel" inputMode="tel" value={contact.phone} onChange={(event) => setContact((current) => ({ ...current, phone: event.target.value }))} placeholder="+256 700 000 000" /></label>
+
+                  <div className="order-total"><span>{quantity} × {selectedTicket.label}</span><strong>{formatUgx(total)}</strong></div>
+                  {formError ? <div className="form-error" role="alert"><p>{formError}</p></div> : null}
+                  <button className="reserve-button" type="submit">Continue to payment</button>
                 </form>
               </>
-            )}
-          </div>
-        </div>
-      )}
+            ) : null}
 
-      {checkoutOpen && (
-        <div className="modal-backdrop" role="presentation">
-          <div className="modal" role="dialog" aria-modal="true" aria-labelledby="payment-title">
-            <button className="modal-close" onClick={() => setCheckoutOpen(false)} aria-label="Close payment dialog"><X size={20} /></button>
-            <div className="modal-kicker">PAYMENT</div>
-            <h2 id="payment-title">Pay for your ticket</h2>
-            <p className="modal-copy"><strong>{ticketType}</strong><br />Choose your mobile money network. You will receive a payment prompt on your phone.</p>
-            <form onSubmit={completePayment}>
-              <fieldset className="payment-options">
-                <legend>Payment method</legend>
-                <label className="payment-option"><input required type="radio" name="network" value="MTN Mobile Money" checked={paymentMethod === 'MTN Mobile Money'} onChange={() => setPaymentMethod('MTN Mobile Money')} /><span><strong>MTN Mobile Money</strong><small>Pay securely with MTN</small></span></label>
-                <label className="payment-option"><input required type="radio" name="network" value="Airtel Money" checked={paymentMethod === 'Airtel Money'} onChange={() => setPaymentMethod('Airtel Money')} /><span><strong>Airtel Money</strong><small>Pay securely with Airtel</small></span></label>
-              </fieldset>
-              <label>Mobile money number<input required name="paymentPhone" type="tel" inputMode="tel" defaultValue={reservation?.phone} placeholder="+256 700 000 000" /></label>
-              {paymentError && <div className="form-error" role="alert"><p>{paymentError}</p><a href={whatsappLink('Hello, I need help reserving a Singles to Mingle ticket.')} target="_blank" rel="noreferrer">Contact us on WhatsApp</a></div>}
-              <button className="reserve-button" type="submit" disabled={isPaying}>{isPaying ? 'Sending payment request…' : `Pay via ${paymentMethod}`}</button>
-            </form>
-            <p className="payment-note">Your payment request will be sent through {paymentMethod} for manual confirmation and secure checkout processing.</p>
+            {step === 'payment' ? (
+              <>
+                <h2 id="reserve-title">Pay {formatUgx(total)}</h2>
+                <p className="modal-copy">{quantity} × {selectedTicket.label}. You will get a payment prompt on your phone.</p>
+                <form onSubmit={completePayment}>
+                  <fieldset className="payment-options">
+                    <legend>Mobile money network</legend>
+                    {NETWORKS.map((option) => (
+                      <label key={option} className="payment-option">
+                        <input required type="radio" name="network" value={option} checked={network === option} onChange={() => setNetwork(option)} />
+                        <MobileMoneyMark network={option} />
+                        <span><strong>{option}</strong><small>Approve the prompt with your PIN</small></span>
+                      </label>
+                    ))}
+                  </fieldset>
+                  <label>Mobile money number<input required type="tel" inputMode="tel" value={paymentPhone} onChange={(event) => setPaymentPhone(event.target.value)} placeholder="+256 700 000 000" /></label>
+                  {formError ? <div className="form-error" role="alert"><p>{formError}</p><a href={whatsappLink(`Hello, I need help reserving ${quantity} ${selectedTicket.label} ticket(s).`)} target="_blank" rel="noreferrer">Contact us on WhatsApp</a></div> : null}
+                  <div className="modal-actions">
+                    <button type="button" className="secondary-button" onClick={() => setStep('details')} disabled={isSubmitting || Boolean(order)}>Back</button>
+                    <button className="reserve-button" type="submit" disabled={isSubmitting}>{isSubmitting ? 'Sending payment request…' : `Pay with ${network.replace(' Mobile Money', ' MoMo')}`}</button>
+                  </div>
+                </form>
+              </>
+            ) : null}
+
+            {step === 'done' && order ? (
+              <div className="success-state">
+                <div className="success-icon"><Check size={28} /></div>
+                <h2 id="reserve-title">{orderPaid ? `Your ticket${order.quantity > 1 ? 's are' : ' is'} confirmed` : 'Approve the payment on your phone'}</h2>
+                <p>{orderPaid ? `We also emailed ${order.quantity > 1 ? 'them' : 'it'} to ${order.email}. Each guest shows their own QR code at the entrance.` : `Enter your PIN to pay ${order.totalAmount}. This page updates as soon as the payment is confirmed.`}</p>
+
+                {orderPaid ? (
+                  <div className="issued-tickets">
+                    {order.tickets.map((ticket) => (
+                      <article key={ticket.ticketCode} className="issued-ticket">
+                        {qrCodes[ticket.ticketCode] ? <img src={qrCodes[ticket.ticketCode]} alt={`QR code for ${ticket.guestName}`} /> : <div className="qr-placeholder" aria-hidden="true" />}
+                        <div>
+                          <strong>{ticket.guestName}</strong>
+                          <span>{order.ticketType}</span>
+                          <code>{ticket.ticketCode}</code>
+                        </div>
+                      </article>
+                    ))}
+                  </div>
+                ) : null}
+
+                <button className="reserve-button" onClick={closeModal}>Done</button>
+              </div>
+            ) : null}
           </div>
         </div>
-      )}
+      ) : null}
     </div>
   )
 }
