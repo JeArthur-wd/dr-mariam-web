@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import uuid
+from datetime import datetime
 from html import escape
 from typing import Any
 from urllib import error as urllib_error
@@ -12,15 +13,20 @@ from urllib import request as urllib_request
 from django.conf import settings
 from django.contrib.auth.hashers import check_password, make_password
 from django.core.mail import EmailMultiAlternatives
+from django.db import transaction
+from django.db.models import Sum
 from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
 from rest_framework import status
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
 
-from .models import AdminAccount, Event, Member, Reservation
+from .models import AdminAccount, Event, Member, Reservation, Ticket, TicketType, build_code_prefix
 
 logger = logging.getLogger(__name__)
+
+PAID_STATUSES = {'paid', 'confirmed', 'checked_in'}
+MAX_TICKETS_PER_ORDER = 10
 
 DEFAULT_EVENT = {
     'title': 'Singles to Mingle 2026',
@@ -29,10 +35,39 @@ DEFAULT_EVENT = {
     'time': '4:30 PM',
     'dressCode': 'Black, Red, White & Pink',
     'ticketOptions': [
-        {'label': 'Early Bird', 'price': 'UGX 150,000', 'highlight': True},
-        {'label': 'Late Ticket', 'price': 'UGX 200,000', 'highlight': False},
+        {'id': None, 'label': 'Early Bird', 'price': 'UGX 150,000', 'amount': 150000, 'highlight': True},
+        {'id': None, 'label': 'Late Ticket', 'price': 'UGX 200,000', 'amount': 200000, 'highlight': False},
     ],
 }
+
+
+def format_ugx(amount: int) -> str:
+    return f'UGX {amount:,}'
+
+
+def parse_amount(value: Any) -> int | None:
+    digits = ''.join(character for character in str(value or '') if character.isdigit())
+    return int(digits) if digits else None
+
+
+def format_event_date(value: str) -> str:
+    """Show ISO dates from the admin date picker as '27 November 2026'; leave free text alone."""
+    try:
+        return datetime.strptime(value.strip(), '%Y-%m-%d').strftime('%d %B %Y').lstrip('0')
+    except ValueError:
+        return value
+
+
+def format_event_time(value: str) -> str:
+    """Show 24-hour times from the admin time picker as '4:30 PM'; leave free text alone."""
+    try:
+        return datetime.strptime(value.strip(), '%H:%M').strftime('%I:%M %p').lstrip('0')
+    except ValueError:
+        return value
+
+
+def read_token(request) -> str:
+    return request.headers.get('Authorization', '').replace('Token ', '').replace('Bearer ', '').strip()
 
 
 def serialize_member(member: Member) -> dict[str, Any]:
@@ -54,13 +89,39 @@ def serialize_admin(admin: AdminAccount) -> dict[str, Any]:
 
 
 def authenticated_admin(request) -> AdminAccount | None:
-    token = request.headers.get('Authorization', '').replace('Token ', '').replace('Bearer ', '').strip()
+    token = read_token(request)
     if not token:
         return None
     try:
         return AdminAccount.objects.get(auth_token=token, is_active=True)
     except AdminAccount.DoesNotExist:
         return None
+
+
+def authenticated_member(request) -> Member | None:
+    token = read_token(request)
+    if not token:
+        return None
+    return Member.objects.filter(auth_token=token).first()
+
+
+def live_event() -> Event | None:
+    return Event.objects.filter(is_active=True).order_by('-created_at').first()
+
+
+def paid_tickets(event: Event):
+    return Ticket.objects.filter(reservation__event=event, reservation__status__in=PAID_STATUSES)
+
+
+def serialize_ticket_type(ticket_type: TicketType) -> dict[str, Any]:
+    return {
+        'id': ticket_type.id,
+        'label': ticket_type.name,
+        'price': format_ugx(ticket_type.price),
+        'amount': ticket_type.price,
+        'highlight': ticket_type.highlight,
+        'codePrefix': ticket_type.code_prefix,
+    }
 
 
 def serialize_event(event: Event | None) -> dict[str, Any]:
@@ -73,47 +134,89 @@ def serialize_event(event: Event | None) -> dict[str, Any]:
     return {
         'id': event.id,
         'title': event.title,
-        'date': event.date,
+        'date': format_event_date(event.date),
+        'dateValue': event.date,
         'venue': event.venue,
-        'time': event.time,
+        'time': format_event_time(event.time),
+        'timeValue': event.time,
         'dressCode': event.dress_code,
         'capacity': event.capacity,
-        'ticketOptions': [
-            {'label': event.early_ticket_label, 'price': event.early_ticket_price, 'highlight': True},
-            {'label': event.late_ticket_label, 'price': event.late_ticket_price, 'highlight': False},
-        ],
+        'ticketsRemaining': max(event.capacity - paid_tickets(event).count(), 0),
+        'ticketOptions': [serialize_ticket_type(ticket_type) for ticket_type in event.ticket_types.all()],
     }
 
 
-def get_ticket_amount(ticket_type: str) -> int | None:
-    """Return the server-controlled amount for a configured ticket type."""
-    event = Event.objects.filter(is_active=True).order_by('-created_at').first()
-    for ticket in serialize_event(event)['ticketOptions']:
-        label = f"{ticket['label']} — {ticket['price']}"
-        if ticket_type == label:
-            return int(''.join(character for character in ticket['price'] if character.isdigit()))
-    return None
+def serialize_admin_event(event: Event) -> dict[str, Any]:
+    paid_reservations = event.reservations.filter(status__in=PAID_STATUSES)
+    tickets = paid_tickets(event)
+    payload = serialize_event(event)
+    payload.update({
+        'isActive': event.is_active,
+        'scannerToken': event.scanner_token,
+        'ticketsSold': tickets.count(),
+        'checkedIn': tickets.filter(checked_in_at__isnull=False).count(),
+        'revenue': format_ugx(paid_reservations.aggregate(total=Sum('total_amount'))['total'] or 0),
+        'hasSales': event.reservations.exists(),
+    })
+    for option in payload['ticketOptions']:
+        option['sold'] = tickets.filter(reservation__ticket_type_ref_id=option['id']).count()
+    return payload
 
 
-def normalize_phone_number(phone_number: str) -> str:
-    """Normalize common Ugandan mobile-number formats for payment providers."""
-    digits = ''.join(character for character in phone_number if character.isdigit())
-    if len(digits) == 10 and digits.startswith('0'):
-        return f'256{digits[1:]}'
-    if len(digits) == 9:
-        return f'256{digits}'
-    return digits
+def build_ticket_qr(event: Event, ticket_type_name: str, guest_name: str, ticket_code: str) -> str:
+    """Everything the door needs is readable straight from the code; the ticket code is what gets verified."""
+    return json.dumps({
+        'event': event.title,
+        'date': format_event_date(event.date),
+        'ticketType': ticket_type_name,
+        'name': guest_name,
+        'code': ticket_code,
+    }, separators=(',', ':'))
+
+
+def read_scanned_code(raw_value: str) -> str:
+    """Accept either a bare ticket code or the JSON content of a ticket QR code."""
+    value = (raw_value or '').strip()
+    if value.startswith('{'):
+        try:
+            data = json.loads(value)
+        except json.JSONDecodeError:
+            return value
+        return str(data.get('code') or data.get('ticketCode') or '').strip()
+    return value
+
+
+def generate_ticket_code(prefix: str) -> str:
+    while True:
+        code = f'{prefix}-{uuid.uuid4().hex[:6].upper()}'
+        if not Ticket.objects.filter(ticket_code=code).exists() and not Reservation.objects.filter(ticket_code=code).exists():
+            return code
+
+
+def serialize_ticket(ticket: Ticket) -> dict[str, Any]:
+    return {
+        'guestName': ticket.guest_name,
+        'ticketCode': ticket.ticket_code,
+        'qrPayload': ticket.qr_payload,
+        'checkedIn': ticket.checked_in_at is not None,
+        'checkedInAt': ticket.checked_in_at.isoformat() if ticket.checked_in_at else None,
+    }
 
 
 def serialize_reservation(reservation: Reservation) -> dict[str, Any]:
+    tickets = [serialize_ticket(ticket) for ticket in reservation.tickets.all()]
     return {
         'id': reservation.id,
         'fullName': reservation.full_name,
         'email': reservation.email,
-        'ticketType': reservation.ticket_type,
+        'eventTitle': reservation.event.title if reservation.event else '',
+        'ticketType': reservation.ticket_type_ref.name if reservation.ticket_type_ref else reservation.ticket_type,
+        'quantity': reservation.quantity,
+        'totalAmount': format_ugx(reservation.total_amount),
         'status': reservation.status,
         'paymentMethod': reservation.payment_method,
         'emailSent': reservation.ticket_email_sent,
+        'tickets': tickets,
         'ticket': {
             'ticketCode': reservation.ticket_code,
             'qrPayload': reservation.qr_payload,
@@ -121,42 +224,58 @@ def serialize_reservation(reservation: Reservation) -> dict[str, Any]:
     }
 
 
-def serialize_admin_attendee(reservation: Reservation) -> dict[str, Any]:
-    amount = get_ticket_amount(reservation.ticket_type)
+def serialize_guest_order(reservation: Reservation) -> dict[str, Any]:
+    tickets = list(reservation.tickets.all())
     return {
-        'name': reservation.full_name,
+        'id': reservation.id,
+        'buyerName': reservation.full_name,
         'email': reservation.email,
-        'ticket': reservation.ticket_type,
-        'amount': f'UGX {amount:,}' if amount is not None else 'UGX 0',
+        'phone': reservation.phone,
+        'eventTitle': reservation.event.title if reservation.event else '',
+        'ticketType': reservation.ticket_type_ref.name if reservation.ticket_type_ref else reservation.ticket_type,
+        'quantity': reservation.quantity,
+        'amountPaid': format_ugx(reservation.total_amount),
+        'amountValue': reservation.total_amount,
+        'paymentMethod': reservation.payment_method,
         'status': reservation.status,
+        'createdAt': reservation.created_at.isoformat(),
+        'checkedIn': sum(1 for ticket in tickets if ticket.checked_in_at),
+        'tickets': [serialize_ticket(ticket) for ticket in tickets],
     }
 
 
 def send_ticket_email(reservation: Reservation) -> bool:
-    """Deliver an event ticket only after a payment has been confirmed."""
-    if reservation.status not in {'paid', 'confirmed'} or reservation.ticket_email_sent:
+    """Deliver event tickets only after a payment has been confirmed."""
+    if reservation.status not in PAID_STATUSES or reservation.ticket_email_sent:
         return reservation.ticket_email_sent
 
-    event = Event.objects.filter(is_active=True).order_by('-created_at').first()
-    details = serialize_event(event)
-    subject = f"Your ticket for {details['title']}"
+    details = serialize_event(reservation.event or live_event())
+    tickets = list(reservation.tickets.all())
+    ticket_type = reservation.ticket_type_ref.name if reservation.ticket_type_ref else reservation.ticket_type
+    subject = f"Your ticket{'s' if len(tickets) > 1 else ''} for {details['title']}"
+    ticket_lines = '\n'.join(f'- {ticket.guest_name}: {ticket.ticket_code}' for ticket in tickets) or f'- {reservation.full_name}: {reservation.ticket_code}'
     text_body = (
         f"Hello {reservation.full_name},\n\n"
-        f"Your payment has been confirmed. Your ticket is ready.\n\n"
+        f"Your payment of {format_ugx(reservation.total_amount)} has been confirmed.\n\n"
         f"Event: {details['title']}\nDate: {details['date']}\n"
         f"Venue: {details['venue']}\nTime: {details['time']}\n"
-        f"Ticket: {reservation.ticket_type}\nTicket code: {reservation.ticket_code}\n\n"
-        "Please present this ticket code at the event entrance."
+        f"Ticket type: {ticket_type} x {reservation.quantity}\n\n"
+        f"Tickets:\n{ticket_lines}\n\n"
+        "Each guest presents their own ticket code or QR code at the entrance."
+    )
+    ticket_items = ''.join(
+        f'<li><strong>{escape(ticket.guest_name)}</strong>: {escape(ticket.ticket_code)}</li>' for ticket in tickets
     )
     html_body = (
-        f"<h2>Your event ticket is confirmed</h2><p>Hello {escape(reservation.full_name)},</p>"
-        f"<p>Your payment has been confirmed for <strong>{escape(details['title'])}</strong>.</p>"
+        f"<h2>Your tickets are confirmed</h2><p>Hello {escape(reservation.full_name)},</p>"
+        f"<p>Your payment of {escape(format_ugx(reservation.total_amount))} has been confirmed for "
+        f"<strong>{escape(details['title'])}</strong>.</p>"
         f"<p><strong>Date:</strong> {escape(details['date'])}<br>"
         f"<strong>Venue:</strong> {escape(details['venue'])}<br>"
         f"<strong>Time:</strong> {escape(details['time'])}<br>"
-        f"<strong>Ticket:</strong> {escape(reservation.ticket_type)}<br>"
-        f"<strong>Ticket code:</strong> {escape(reservation.ticket_code)}</p>"
-        "<p>Please present this code at the event entrance.</p>"
+        f"<strong>Ticket type:</strong> {escape(ticket_type)} &times; {reservation.quantity}</p>"
+        f"<ul>{ticket_items}</ul>"
+        "<p>Each guest presents their own ticket code or QR code at the entrance.</p>"
     )
     try:
         message = EmailMultiAlternatives(subject, text_body, settings.DEFAULT_FROM_EMAIL, [reservation.email])
@@ -173,17 +292,52 @@ def send_ticket_email(reservation: Reservation) -> bool:
 
 
 def mark_reservation_paid(reservation: Reservation) -> bool:
-    if reservation.status not in {'paid', 'confirmed'}:
+    if reservation.status not in PAID_STATUSES:
         reservation.status = 'paid'
-        try:
-            qr_data = json.loads(reservation.qr_payload or '{}')
-        except json.JSONDecodeError:
-            qr_data = {}
-        qr_data['status'] = 'paid'
-        qr_data['ticketCode'] = reservation.ticket_code
-        reservation.qr_payload = json.dumps(qr_data, separators=(',', ':'))
-        reservation.save(update_fields=['status', 'qr_payload'])
+        reservation.save(update_fields=['status'])
     return send_ticket_email(reservation)
+
+
+def check_in_ticket(raw_code: str, event: Event | None = None, commit: bool = True) -> tuple[int, dict[str, Any]]:
+    """Validate a scanned ticket and admit it once. Returns (http_status, body)."""
+    code = read_scanned_code(raw_code)
+    if not code:
+        return status.HTTP_400_BAD_REQUEST, {'result': 'invalid', 'error': 'Ticket code is required.'}
+
+    ticket = Ticket.objects.select_related('reservation__event', 'reservation__ticket_type_ref').filter(ticket_code__iexact=code).first()
+    if ticket is None:
+        return status.HTTP_404_NOT_FOUND, {'result': 'not_found', 'error': 'Ticket not found.', 'ticketCode': code}
+
+    reservation = ticket.reservation
+    guest = {
+        'name': ticket.guest_name,
+        'buyerName': reservation.full_name,
+        'email': reservation.email,
+        'ticket': reservation.ticket_type_ref.name if reservation.ticket_type_ref else reservation.ticket_type,
+        'eventTitle': reservation.event.title if reservation.event else '',
+        'status': reservation.status,
+        'amount': format_ugx(reservation.unit_price),
+        'ticketCode': ticket.ticket_code,
+        'checkedInAt': ticket.checked_in_at.isoformat() if ticket.checked_in_at else None,
+    }
+
+    if event is not None and reservation.event_id != event.id:
+        return status.HTTP_400_BAD_REQUEST, {'result': 'wrong_event', 'error': 'This ticket is for a different event.', 'guest': guest}
+    if reservation.status not in PAID_STATUSES:
+        return status.HTTP_400_BAD_REQUEST, {'result': 'unpaid', 'error': 'Payment for this ticket has not been confirmed.', 'guest': guest}
+    if ticket.checked_in_at is not None:
+        return status.HTTP_409_CONFLICT, {'result': 'already_checked_in', 'error': 'This ticket has already been used.', 'guest': guest}
+    if not commit:
+        return status.HTTP_200_OK, {'result': 'valid', 'message': 'Ticket is valid.', 'guest': guest}
+
+    ticket.checked_in_at = timezone.now()
+    ticket.save(update_fields=['checked_in_at'])
+    if not reservation.tickets.filter(checked_in_at__isnull=True).exists():
+        reservation.status = 'checked_in'
+        reservation.save(update_fields=['status'])
+    guest['status'] = reservation.status
+    guest['checkedInAt'] = ticket.checked_in_at.isoformat()
+    return status.HTTP_200_OK, {'result': 'checked_in', 'message': f'{ticket.guest_name} is checked in.', 'guest': guest}
 
 
 @api_view(['GET'])
@@ -320,183 +474,264 @@ def logout_admin(request):
     return Response({'message': 'Logged out successfully.'})
 
 
+ADMIN_REQUIRED = {'error': 'Administrator authentication required.'}
+
+
 @api_view(['GET'])
 def event_details(request):
-    event = Event.objects.filter(is_active=True).order_by('-created_at').first()
-    return Response(serialize_event(event))
+    return Response(serialize_event(live_event()))
 
 
-@api_view(['POST'])
-@csrf_exempt
-def create_event(request):
-    if not authenticated_admin(request):
-        return Response({'error': 'Administrator authentication required.'}, status=status.HTTP_401_UNAUTHORIZED)
-    title = (request.data.get('title') or '').strip() or 'Singles to Mingle 2026'
-    date = (request.data.get('date') or '').strip() or '27 November 2026'
-    venue = (request.data.get('venue') or '').strip() or 'Sheraton Hotel'
-    time = (request.data.get('time') or '').strip() or '4:30 PM'
-    dress_code = (request.data.get('dressCode') or '').strip() or 'Black, Red, White & Pink'
-    capacity = request.data.get('capacity')
-
-    try:
-        capacity_value = int(capacity) if capacity is not None and str(capacity).strip() else 200
-    except (TypeError, ValueError):
-        capacity_value = 200
-
-    ticket_types = request.data.get('ticketTypes') or []
-
-    if isinstance(ticket_types, list) and ticket_types:
-        first_ticket = ticket_types[0] if isinstance(ticket_types[0], dict) else {}
-        second_ticket = ticket_types[1] if len(ticket_types) > 1 and isinstance(ticket_types[1], dict) else {}
-        early_label = str(first_ticket.get('name') or 'Early Bird').strip() or 'Early Bird'
-        early_price = str(first_ticket.get('price') or 'UGX 150,000').strip() or 'UGX 150,000'
-        late_label = str(second_ticket.get('name') or 'Late Ticket').strip() or 'Late Ticket'
-        late_price = str(second_ticket.get('price') or 'UGX 200,000').strip() or 'UGX 200,000'
-    else:
-        early_label, early_price = 'Early Bird', 'UGX 150,000'
-        late_label, late_price = 'Late Ticket', 'UGX 200,000'
-
-    Event.objects.filter(is_active=True).update(is_active=False)
-    event = Event.objects.create(
-        title=title,
-        date=date,
-        venue=venue,
-        time=time,
-        dress_code=dress_code,
-        capacity=capacity_value,
-        early_ticket_label=early_label,
-        early_ticket_price=early_price,
-        late_ticket_label=late_label,
-        late_ticket_price=late_price,
-        is_active=True,
+def _create_ticket_type(event: Event, name: str, price: int, highlight: bool) -> TicketType:
+    return TicketType.objects.create(
+        event=event,
+        name=name,
+        price=price,
+        code_prefix=build_code_prefix(event.title, name),
+        highlight=highlight,
     )
 
-    return Response({'message': 'Event created successfully.', 'event': serialize_event(event)}, status=status.HTTP_201_CREATED)
+
+def _read_event_fields(data, current: Event | None = None) -> tuple[dict[str, Any], str | None]:
+    """Collect event form fields; every field is required on create and optional on update."""
+    labels = {'title': 'Event title', 'date': 'Date', 'time': 'Time', 'venue': 'Venue', 'dressCode': 'Dress code'}
+    columns = {'title': 'title', 'date': 'date', 'time': 'time', 'venue': 'venue', 'dressCode': 'dress_code'}
+    fields: dict[str, Any] = {}
+    missing = []
+    for key, column in columns.items():
+        value = str(data.get(key) or '').strip()
+        if value:
+            fields[column] = value
+        elif current is None:
+            missing.append(labels[key])
+    if missing:
+        return fields, f"{', '.join(missing)} {'is' if len(missing) == 1 else 'are'} required."
+
+    capacity = data.get('capacity')
+    if capacity is not None and str(capacity).strip():
+        try:
+            fields['capacity'] = max(int(capacity), 1)
+        except (TypeError, ValueError):
+            return fields, 'Capacity must be a whole number.'
+    return fields, None
 
 
-@api_view(['GET'])
-def admin_dashboard(request):
+@api_view(['GET', 'POST'])
+@csrf_exempt
+def admin_events(request):
     if not authenticated_admin(request):
-        return Response({'error': 'Administrator authentication required.'}, status=status.HTTP_401_UNAUTHORIZED)
-    event = Event.objects.filter(is_active=True).order_by('-created_at').first()
-    reservations = Reservation.objects.order_by('-created_at')
-    attendees = [serialize_admin_attendee(reservation) for reservation in reservations]
-    paid_count = reservations.filter(status__in={'paid', 'confirmed', 'checked_in'}).count()
-    revenue_total = 0
-    for reservation in reservations.filter(status__in={'paid', 'confirmed', 'checked_in'}):
-        amount = get_ticket_amount(reservation.ticket_type)
-        if amount is not None:
-            revenue_total += amount
+        return Response(ADMIN_REQUIRED, status=status.HTTP_401_UNAUTHORIZED)
 
-    payload = {
-        'event': serialize_event(event),
-        'summary': {
-            'paidGuests': paid_count,
-            'revenue': f'UGX {revenue_total:,}',
-            'capacity': int((event or Event()).capacity if event else 200),
-            'totalReservations': reservations.count(),
-        },
-        'attendees': attendees,
-        'scannerLinks': [
-            {'label': 'Main entrance', 'href': '/admin/scanner', 'type': 'Live check-in'},
-            {'label': 'VIP lane', 'href': '/admin/scanner', 'type': 'Priority scan'},
-            {'label': 'Guest list', 'href': '/admin/scanner', 'type': 'Printed list'},
-        ],
-    }
-    return Response(payload)
+    if request.method == 'GET':
+        return Response({'events': [serialize_admin_event(event) for event in Event.objects.prefetch_related('ticket_types')]})
+
+    fields, error = _read_event_fields(request.data)
+    if error:
+        return Response({'error': error}, status=status.HTTP_400_BAD_REQUEST)
+
+    with transaction.atomic():
+        # The newest published event is the one members can book.
+        Event.objects.filter(is_active=True).update(is_active=False)
+        event = Event.objects.create(is_active=True, **fields)
+        ticket_types = request.data.get('ticketTypes') or []
+        for index, ticket in enumerate(ticket_types if isinstance(ticket_types, list) else []):
+            name = str((ticket or {}).get('name') or '').strip()
+            price = parse_amount((ticket or {}).get('price'))
+            if name and price:
+                _create_ticket_type(event, name, price, highlight=index == 0)
+
+    return Response({'message': 'Event created. Now add its ticket types.', 'event': serialize_admin_event(event)}, status=status.HTTP_201_CREATED)
 
 
 @api_view(['POST'])
 @csrf_exempt
 def update_event(request, event_id: int):
     if not authenticated_admin(request):
-        return Response({'error': 'Administrator authentication required.'}, status=status.HTTP_401_UNAUTHORIZED)
-    try:
-        event = Event.objects.get(id=event_id)
-    except Event.DoesNotExist:
+        return Response(ADMIN_REQUIRED, status=status.HTTP_401_UNAUTHORIZED)
+    event = Event.objects.filter(id=event_id).first()
+    if event is None:
         return Response({'error': 'Event not found.'}, status=status.HTTP_404_NOT_FOUND)
 
-    title = (request.data.get('title') or event.title).strip() or event.title
-    date = (request.data.get('date') or event.date).strip() or event.date
-    venue = (request.data.get('venue') or event.venue).strip() or event.venue
-    time = (request.data.get('time') or event.time).strip() or event.time
-    dress_code = (request.data.get('dressCode') or event.dress_code).strip() or event.dress_code
-    capacity = request.data.get('capacity')
-    try:
-        capacity_value = int(capacity) if capacity is not None and str(capacity).strip() else event.capacity
-    except (TypeError, ValueError):
-        capacity_value = event.capacity
+    fields, error = _read_event_fields(request.data, current=event)
+    if error:
+        return Response({'error': error}, status=status.HTTP_400_BAD_REQUEST)
 
-    event.title = title
-    event.date = date
-    event.venue = venue
-    event.time = time
-    event.dress_code = dress_code
-    event.capacity = capacity_value
-
-    ticket_types = request.data.get('ticketTypes') or []
-    if isinstance(ticket_types, list) and ticket_types:
-        first_ticket = ticket_types[0] if isinstance(ticket_types[0], dict) else {}
-        second_ticket = ticket_types[1] if len(ticket_types) > 1 and isinstance(ticket_types[1], dict) else {}
-        event.early_ticket_label = str(first_ticket.get('name') or event.early_ticket_label).strip() or event.early_ticket_label
-        event.early_ticket_price = str(first_ticket.get('price') or event.early_ticket_price).strip() or event.early_ticket_price
-        event.late_ticket_label = str(second_ticket.get('name') or event.late_ticket_label).strip() or event.late_ticket_label
-        event.late_ticket_price = str(second_ticket.get('price') or event.late_ticket_price).strip() or event.late_ticket_price
-
-    event.save()
-    return Response({'message': 'Event updated successfully.', 'event': serialize_event(event)})
+    with transaction.atomic():
+        for column, value in fields.items():
+            setattr(event, column, value)
+        if request.data.get('isActive') is True:
+            Event.objects.exclude(id=event.id).filter(is_active=True).update(is_active=False)
+            event.is_active = True
+        event.save()
+    return Response({'message': 'Event updated successfully.', 'event': serialize_admin_event(event)})
 
 
 @api_view(['POST'])
 @csrf_exempt
 def delete_event(request, event_id: int):
     if not authenticated_admin(request):
-        return Response({'error': 'Administrator authentication required.'}, status=status.HTTP_401_UNAUTHORIZED)
-    try:
-        event = Event.objects.get(id=event_id)
-    except Event.DoesNotExist:
+        return Response(ADMIN_REQUIRED, status=status.HTTP_401_UNAUTHORIZED)
+    event = Event.objects.filter(id=event_id).first()
+    if event is None:
+        return Response({'error': 'Event not found.'}, status=status.HTTP_404_NOT_FOUND)
+    if event.reservations.exists():
+        return Response({'error': 'This event already has reservations, so it cannot be deleted.'}, status=status.HTTP_400_BAD_REQUEST)
+
+    event.delete()
+    return Response({'message': 'Event deleted successfully.'})
+
+
+@api_view(['POST'])
+@csrf_exempt
+def create_ticket_type(request, event_id: int):
+    if not authenticated_admin(request):
+        return Response(ADMIN_REQUIRED, status=status.HTTP_401_UNAUTHORIZED)
+    event = Event.objects.filter(id=event_id).first()
+    if event is None:
         return Response({'error': 'Event not found.'}, status=status.HTTP_404_NOT_FOUND)
 
-    event.is_active = False
-    event.save(update_fields=['is_active'])
-    return Response({'message': 'Event deleted successfully.'})
+    name = str(request.data.get('name') or '').strip()
+    price = parse_amount(request.data.get('price'))
+    if not name or not price:
+        return Response({'error': 'Ticket name and a price above zero are required.'}, status=status.HTTP_400_BAD_REQUEST)
+    if event.ticket_types.filter(name__iexact=name).exists():
+        return Response({'error': f'This event already has a "{name}" ticket.'}, status=status.HTTP_400_BAD_REQUEST)
+
+    _create_ticket_type(event, name, price, highlight=bool(request.data.get('highlight')))
+    return Response({'message': 'Ticket type added.', 'event': serialize_admin_event(event)}, status=status.HTTP_201_CREATED)
+
+
+@api_view(['POST'])
+@csrf_exempt
+def delete_ticket_type(request, ticket_type_id: int):
+    if not authenticated_admin(request):
+        return Response(ADMIN_REQUIRED, status=status.HTTP_401_UNAUTHORIZED)
+    ticket_type = TicketType.objects.select_related('event').filter(id=ticket_type_id).first()
+    if ticket_type is None:
+        return Response({'error': 'Ticket type not found.'}, status=status.HTTP_404_NOT_FOUND)
+    if ticket_type.reservations.exists():
+        return Response({'error': 'This ticket type has already been sold, so it cannot be removed.'}, status=status.HTTP_400_BAD_REQUEST)
+
+    event = ticket_type.event
+    ticket_type.delete()
+    return Response({'message': 'Ticket type removed.', 'event': serialize_admin_event(event)})
+
+
+@api_view(['POST'])
+@csrf_exempt
+def regenerate_scanner_link(request, event_id: int):
+    if not authenticated_admin(request):
+        return Response(ADMIN_REQUIRED, status=status.HTTP_401_UNAUTHORIZED)
+    event = Event.objects.filter(id=event_id).first()
+    if event is None:
+        return Response({'error': 'Event not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+    event.scanner_token = uuid.uuid4().hex
+    event.save(update_fields=['scanner_token'])
+    return Response({'message': 'New scanner link created. The old link no longer works.', 'event': serialize_admin_event(event)})
+
+
+@api_view(['GET'])
+def admin_dashboard(request):
+    if not authenticated_admin(request):
+        return Response(ADMIN_REQUIRED, status=status.HTTP_401_UNAUTHORIZED)
+
+    paid_reservations = Reservation.objects.filter(status__in=PAID_STATUSES)
+    paid_ticket_set = Ticket.objects.filter(reservation__status__in=PAID_STATUSES)
+    event = live_event()
+    recent_sales = paid_reservations.select_related('event', 'ticket_type_ref').prefetch_related('tickets').order_by('-created_at')[:8]
+    events = Event.objects.order_by('-created_at')
+
+    return Response({
+        'event': serialize_admin_event(event) if event else serialize_event(None),
+        'summary': {
+            'revenue': format_ugx(paid_reservations.aggregate(total=Sum('total_amount'))['total'] or 0),
+            'ticketsSold': paid_ticket_set.count(),
+            'paidOrders': paid_reservations.count(),
+            'pendingOrders': Reservation.objects.filter(status='pending').count(),
+            'checkedIn': paid_ticket_set.filter(checked_in_at__isnull=False).count(),
+            'capacity': event.capacity if event else 200,
+            'liveTicketsSold': paid_tickets(event).count() if event else 0,
+        },
+        'revenueByEvent': [
+            {
+                'id': item.id,
+                'title': item.title,
+                'isActive': item.is_active,
+                'revenue': format_ugx(item.reservations.filter(status__in=PAID_STATUSES).aggregate(total=Sum('total_amount'))['total'] or 0),
+                'ticketsSold': paid_tickets(item).count(),
+            }
+            for item in events
+        ],
+        'recentSales': [serialize_guest_order(reservation) for reservation in recent_sales],
+    })
+
+
+@api_view(['GET'])
+def admin_guests(request):
+    if not authenticated_admin(request):
+        return Response(ADMIN_REQUIRED, status=status.HTTP_401_UNAUTHORIZED)
+
+    reservations = Reservation.objects.filter(status__in=PAID_STATUSES).select_related('event', 'ticket_type_ref').prefetch_related('tickets')
+    event_id = request.query_params.get('event')
+    if event_id:
+        reservations = reservations.filter(event_id=event_id)
+    orders = [serialize_guest_order(reservation) for reservation in reservations.order_by('-created_at')]
+
+    return Response({
+        'orders': orders,
+        'totals': {
+            'orders': len(orders),
+            'tickets': sum(order['quantity'] for order in orders),
+            'checkedIn': sum(order['checkedIn'] for order in orders),
+            'amountPaid': format_ugx(sum(order['amountValue'] for order in orders)),
+        },
+    })
 
 
 @api_view(['POST'])
 @csrf_exempt
 def validate_ticket_scan(request):
     if not authenticated_admin(request):
-        return Response({'error': 'Administrator authentication required.'}, status=status.HTTP_401_UNAUTHORIZED)
-    ticket_code = (request.data.get('ticketCode') or '').strip()
-    if not ticket_code:
-        return Response({'error': 'Ticket code is required.'}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(ADMIN_REQUIRED, status=status.HTTP_401_UNAUTHORIZED)
+    http_status, body = check_in_ticket(request.data.get('ticketCode') or '', commit=bool(request.data.get('checkIn')))
+    return Response(body, status=http_status)
 
-    try:
-        reservation = Reservation.objects.get(ticket_code__iexact=ticket_code)
-    except Reservation.DoesNotExist:
-        return Response({'error': 'Ticket not found.'}, status=status.HTTP_404_NOT_FOUND)
 
-    should_check_in = bool(request.data.get('checkIn'))
-    if should_check_in and reservation.status in {'paid', 'confirmed'}:
-        reservation.status = 'checked_in'
-        try:
-            qr_data = json.loads(reservation.qr_payload or '{}')
-        except json.JSONDecodeError:
-            qr_data = {}
-        qr_data['status'] = 'checked_in'
-        qr_data['ticketCode'] = reservation.ticket_code
-        reservation.qr_payload = json.dumps(qr_data, separators=(',', ':'))
-        reservation.save(update_fields=['status', 'qr_payload'])
+def _scanner_event(token: str) -> Event | None:
+    return Event.objects.filter(scanner_token=token).first() if token else None
 
-    guest = {
-        'name': reservation.full_name,
-        'email': reservation.email,
-        'ticket': reservation.ticket_type,
-        'status': reservation.status,
-        'amount': f"UGX {get_ticket_amount(reservation.ticket_type) or 0:,}",
-        'ticketCode': reservation.ticket_code,
+
+def _scanner_summary(event: Event) -> dict[str, Any]:
+    tickets = paid_tickets(event)
+    return {
+        'title': event.title,
+        'date': format_event_date(event.date),
+        'time': format_event_time(event.time),
+        'venue': event.venue,
+        'ticketsSold': tickets.count(),
+        'checkedIn': tickets.filter(checked_in_at__isnull=False).count(),
     }
-    return Response({'guest': guest, 'message': 'Ticket validated successfully.'})
+
+
+@api_view(['GET'])
+def scanner_event(request, token: str):
+    event = _scanner_event(token)
+    if event is None:
+        return Response({'error': 'This scanner link is invalid or has been replaced.'}, status=status.HTTP_404_NOT_FOUND)
+    return Response({'event': _scanner_summary(event)})
+
+
+@api_view(['POST'])
+@csrf_exempt
+def scanner_check_in(request, token: str):
+    """Door-staff check-in: the secret link itself is the credential, limited to one event."""
+    event = _scanner_event(token)
+    if event is None:
+        return Response({'error': 'This scanner link is invalid or has been replaced.'}, status=status.HTTP_404_NOT_FOUND)
+    http_status, body = check_in_ticket(request.data.get('code') or '', event=event)
+    body['event'] = _scanner_summary(event)
+    return Response(body, status=http_status)
 
 
 def _build_gateway_config(gateway: str) -> dict[str, str]:
@@ -759,14 +994,15 @@ def initiate_payment(request):
     except (Reservation.DoesNotExist, ValueError, TypeError):
         return Response({'error': 'Reservation not found.'}, status=status.HTTP_404_NOT_FOUND)
 
-    if reservation.status in {'paid', 'confirmed'}:
+    if reservation.status in PAID_STATUSES:
         return Response({'error': 'This reservation has already been paid for.'}, status=status.HTTP_400_BAD_REQUEST)
 
     gateway = (request.data.get('paymentMethod') or request.data.get('gateway') or reservation.payment_method).strip()
     phone_number = normalize_phone_number((request.data.get('phoneNumber') or request.data.get('paymentPhone') or '').strip())
     full_name = reservation.full_name
-    ticket_type = reservation.ticket_type
-    amount = get_ticket_amount(ticket_type)
+    ticket_type = f'{reservation.ticket_type_ref.name if reservation.ticket_type_ref else reservation.ticket_type} x {reservation.quantity}'
+    # The amount always comes from the stored order, never from the client.
+    amount = reservation.total_amount or None
 
     if gateway not in {'MTN Mobile Money', 'Airtel Money'}:
         return Response({'error': 'Please select MTN Mobile Money or Airtel Money.'}, status=status.HTTP_400_BAD_REQUEST)
@@ -819,45 +1055,69 @@ def reserve_ticket(request):
     full_name = (request.data.get('fullName') or member.full_name).strip()
     email = (request.data.get('email') or member.email).strip().lower()
     phone = (request.data.get('phone') or '').strip()
-    ticket_type = (request.data.get('ticketType') or 'Early Bird — UGX 150,000').strip()
     payment_method = (request.data.get('paymentMethod') or request.data.get('gateway') or 'MTN Mobile Money').strip()
     payment_phone = (request.data.get('paymentPhone') or '').strip()
 
     if not full_name or not phone or not email:
         return Response({'error': 'Full name, phone number and email are required.'}, status=status.HTTP_400_BAD_REQUEST)
 
-    if get_ticket_amount(ticket_type) is None:
+    event = live_event()
+    if event is None:
+        return Response({'error': 'Ticket sales are not open yet.'}, status=status.HTTP_400_BAD_REQUEST)
+
+    ticket_type = event.ticket_types.filter(id=parse_amount(request.data.get('ticketTypeId')) or 0).first()
+    if ticket_type is None:
         return Response({'error': 'Please select a valid ticket type.'}, status=status.HTTP_400_BAD_REQUEST)
+
+    try:
+        quantity = int(request.data.get('quantity') or 1)
+    except (TypeError, ValueError):
+        quantity = 0
+    if not 1 <= quantity <= MAX_TICKETS_PER_ORDER:
+        return Response({'error': f'You can reserve between 1 and {MAX_TICKETS_PER_ORDER} tickets at a time.'}, status=status.HTTP_400_BAD_REQUEST)
+
+    remaining = event.capacity - paid_tickets(event).count()
+    if quantity > remaining:
+        message = 'This event is sold out.' if remaining <= 0 else f'Only {remaining} ticket{"s" if remaining != 1 else ""} left.'
+        return Response({'error': message}, status=status.HTTP_400_BAD_REQUEST)
+
+    guest_names = request.data.get('guestNames')
+    guest_names = [str(name or '').strip() for name in guest_names] if isinstance(guest_names, list) else []
+    guest_names = (guest_names + [''] * quantity)[:quantity]
+    guest_names[0] = guest_names[0] or full_name
+    if not all(guest_names):
+        return Response({'error': 'Enter a guest name for every ticket.'}, status=status.HTTP_400_BAD_REQUEST)
 
     if payment_method not in {'MTN Mobile Money', 'Airtel Money'}:
         payment_method = 'MTN Mobile Money'
 
-    ticket_code = f'DRM-{uuid.uuid4().hex[:10].upper()}'
-    qr_payload = json.dumps({
-        'event': 'Singles to Mingle 2026',
-        'fullName': full_name,
-        'email': email,
-        'phone': phone,
-        'ticketType': ticket_type,
-        'ticketCode': ticket_code,
-        'status': 'pending',
-    }, separators=(',', ':'))
-
-    reservation = Reservation.objects.create(
-        member=member,
-        full_name=full_name,
-        email=email,
-        phone=phone,
-        ticket_type=ticket_type,
-        ticket_code=ticket_code,
-        qr_payload=qr_payload,
-        payment_method=payment_method,
-        payment_phone=payment_phone,
-        status='pending',
-    )
+    with transaction.atomic():
+        codes = [generate_ticket_code(ticket_type.code_prefix) for _ in guest_names]
+        payloads = [build_ticket_qr(event, ticket_type.name, name, code) for name, code in zip(guest_names, codes)]
+        reservation = Reservation.objects.create(
+            member=member,
+            event=event,
+            ticket_type_ref=ticket_type,
+            quantity=quantity,
+            unit_price=ticket_type.price,
+            total_amount=ticket_type.price * quantity,
+            full_name=full_name,
+            email=email,
+            phone=phone,
+            ticket_type=f'{ticket_type.name} — {format_ugx(ticket_type.price)}',
+            ticket_code=codes[0],
+            qr_payload=payloads[0],
+            payment_method=payment_method,
+            payment_phone=payment_phone,
+            status='pending',
+        )
+        Ticket.objects.bulk_create([
+            Ticket(reservation=reservation, guest_name=name, ticket_code=code, qr_payload=payload)
+            for name, code, payload in zip(guest_names, codes, payloads)
+        ])
 
     return Response({
-        'message': 'Reservation created. Complete your payment to receive the ticket by email.',
+        'message': 'Reservation created. Complete your payment to receive your tickets by email.',
         'reservation': serialize_reservation(reservation),
     }, status=status.HTTP_201_CREATED)
 
@@ -925,7 +1185,7 @@ def resend_ticket_email(request, reservation_id: int):
     except (Member.DoesNotExist, Reservation.DoesNotExist):
         return Response({'error': 'Reservation not found.'}, status=status.HTTP_404_NOT_FOUND)
 
-    if reservation.status not in {'paid', 'confirmed'}:
+    if reservation.status not in PAID_STATUSES:
         return Response({'error': 'Your ticket is emailed after payment is confirmed.'}, status=status.HTTP_400_BAD_REQUEST)
 
     reservation.ticket_email_sent = False

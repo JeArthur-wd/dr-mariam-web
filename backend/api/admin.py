@@ -1,6 +1,6 @@
 from django.contrib import admin
 
-from .models import AdminAccount, Event, Member, Reservation
+from .models import AdminAccount, Event, Member, Reservation, Ticket, TicketType
 
 
 @admin.register(AdminAccount)
@@ -36,3 +36,17 @@ class ReservationAdmin(admin.ModelAdmin):
     @admin.display(description='Email')
     def email_display(self, obj):
         return obj.member.email if obj.member else 'N/A'
+
+
+
+@admin.register(TicketType)
+class TicketTypeAdmin(admin.ModelAdmin):
+    list_display = ('name', 'event', 'price', 'code_prefix', 'highlight')
+    list_filter = ('event',)
+
+
+@admin.register(Ticket)
+class TicketAdmin(admin.ModelAdmin):
+    list_display = ('guest_name', 'ticket_code', 'reservation', 'checked_in_at')
+    search_fields = ('guest_name', 'ticket_code')
+    readonly_fields = ('ticket_code', 'qr_payload', 'created_at')

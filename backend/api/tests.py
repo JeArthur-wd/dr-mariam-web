@@ -3,363 +3,292 @@ import json
 from django.core import mail
 from django.test import TestCase, override_settings
 
-from .models import AdminAccount, Reservation
+from .models import AdminAccount, Event, Reservation, Ticket, TicketType, build_code_prefix
+
+
+def post_json(client, path, payload, **headers):
+    return client.post(path, data=json.dumps(payload), content_type='application/json', **headers)
+
+
+def create_member_token(client, email='guest@example.com', full_name='Event Guest'):
+    response = post_json(client, '/api/auth/signup/', {'fullName': full_name, 'email': email, 'password': 'secure-password'})
+    return response.json()['user']['token']
+
+
+def create_admin_headers(client):
+    response = post_json(client, '/api/admin/auth/signup/', {
+        'fullName': 'Site Administrator',
+        'email': 'admin@example.com',
+        'password': 'admin-password',
+    })
+    return {'HTTP_AUTHORIZATION': f"Token {response.json()['admin']['token']}"}
+
+
+def create_live_event(capacity=200):
+    event = Event.objects.create(
+        title='Singles to Mingle 2026',
+        date='2026-11-27',
+        time='16:30',
+        venue='Sheraton Hotel',
+        dress_code='Black, Red, White & Pink',
+        capacity=capacity,
+        is_active=True,
+    )
+    early = TicketType.objects.create(event=event, name='Early Bird', price=150000, code_prefix=build_code_prefix(event.title, 'Early Bird'), highlight=True)
+    late = TicketType.objects.create(event=event, name='Late Ticket', price=200000, code_prefix=build_code_prefix(event.title, 'Late Ticket'))
+    return event, early, late
+
+
+def reserve(client, token, ticket_type, quantity=1, guest_names=None):
+    return post_json(client, '/api/event/reserve/', {
+        'fullName': 'Event Guest',
+        'phone': '+256 700 000 000',
+        'email': 'eventguest@example.com',
+        'ticketTypeId': ticket_type.id,
+        'quantity': quantity,
+        'guestNames': guest_names or ['Event Guest'],
+        'paymentMethod': 'MTN Mobile Money',
+    }, HTTP_AUTHORIZATION=f'Token {token}')
+
+
+def mark_paid(reservation_id):
+    reservation = Reservation.objects.get(id=reservation_id)
+    reservation.status = 'paid'
+    reservation.save(update_fields=['status'])
+    return reservation
 
 
 class MemberApiTests(TestCase):
-    def post_json(self, path, payload, **headers):
-        return self.client.post(path, data=json.dumps(payload), content_type='application/json', **headers)
-
-    def create_member(self):
-        response = self.post_json('/api/auth/signup/', {
-            'fullName': 'Jane Doe',
-            'email': 'jane@example.com',
-            'password': 'secure-password',
-        })
-        self.assertEqual(response.status_code, 201)
-        return response.json()['user']
-
     def test_member_can_sign_up_log_in_and_view_profile(self):
-        member = self.create_member()
-        self.assertEqual(member['fullName'], 'Jane Doe')
-        self.assertNotIn('password', member)
-
-        login_response = self.post_json('/api/auth/login/', {
-            'email': 'jane@example.com',
-            'password': 'secure-password',
-        })
+        create_member_token(self.client, 'jane@example.com', 'Jane Doe')
+        login_response = post_json(self.client, '/api/auth/login/', {'email': 'jane@example.com', 'password': 'secure-password'})
         self.assertEqual(login_response.status_code, 200)
         token = login_response.json()['user']['token']
+        self.assertNotIn('password', login_response.json()['user'])
 
         profile_response = self.client.get('/api/auth/me/', HTTP_AUTHORIZATION=f'Token {token}')
         self.assertEqual(profile_response.status_code, 200)
-        self.assertEqual(profile_response.json()['user']['email'], 'jane@example.com')
+        self.assertEqual(profile_response.json()['user']['fullName'], 'Jane Doe')
 
     def test_duplicate_email_is_rejected(self):
-        self.create_member()
-        response = self.post_json('/api/auth/signup/', {
-            'fullName': 'Another Jane',
-            'email': 'JANE@example.com',
-            'password': 'another-password',
-        })
+        create_member_token(self.client, 'jane@example.com')
+        response = post_json(self.client, '/api/auth/signup/', {'fullName': 'Another Jane', 'email': 'JANE@example.com', 'password': 'another-password'})
         self.assertEqual(response.status_code, 400)
 
+    def test_logout_invalidates_the_member_token(self):
+        token = create_member_token(self.client)
+        self.client.post('/api/auth/logout/', HTTP_AUTHORIZATION=f'Token {token}')
+        me_response = self.client.get('/api/auth/me/', HTTP_AUTHORIZATION=f'Token {token}')
+        self.assertEqual(me_response.status_code, 401)
 
-class EventApiTests(TestCase):
-    def post_json(self, path, payload, **headers):
-        return self.client.post(path, data=json.dumps(payload), content_type='application/json', **headers)
 
-    def authenticated_token(self):
-        response = self.post_json('/api/auth/signup/', {
-            'fullName': 'Event Guest',
-            'email': 'guest@example.com',
-            'password': 'secure-password',
-        })
-        return response.json()['user']['token']
+class ReservationTests(TestCase):
+    def setUp(self):
+        self.event, self.early, self.late = create_live_event(capacity=5)
+        self.token = create_member_token(self.client)
 
-    def test_event_details_are_available_without_login(self):
+    def test_event_details_list_ticket_types_with_readable_date(self):
         response = self.client.get('/api/event/details/')
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()['title'], 'Singles to Mingle 2026')
-        self.assertEqual(len(response.json()['ticketOptions']), 2)
+        data = response.json()
+        self.assertEqual(data['date'], '27 November 2026')
+        self.assertEqual(data['time'], '4:30 PM')
+        self.assertEqual([option['label'] for option in data['ticketOptions']], ['Early Bird', 'Late Ticket'])
+        self.assertEqual(data['ticketOptions'][1]['id'], self.late.id)
 
-    def test_authenticated_member_can_reserve_ticket(self):
-        token = self.authenticated_token()
-        response = self.post_json('/api/event/reserve/', {
-            'fullName': 'Event Guest',
-            'phone': '+256 700 000 000',
-            'email': 'eventguest@example.com',
-            'ticketType': 'Early Bird — UGX 150,000',
-            'paymentMethod': 'MTN Mobile Money',
-            'paymentPhone': '+256 700 000 000',
-        }, HTTP_AUTHORIZATION=f'Token {token}')
+    def test_reserves_the_selected_ticket_type_with_one_ticket_per_guest(self):
+        response = reserve(self.client, self.token, self.late, quantity=3, guest_names=['Event Guest', 'Amina K', 'Sarah N'])
         self.assertEqual(response.status_code, 201)
-        self.assertEqual(response.json()['reservation']['status'], 'pending')
-        self.assertEqual(Reservation.objects.count(), 1)
-        self.assertEqual(Reservation.objects.first().email, 'eventguest@example.com')
-        self.assertTrue(response.json()['reservation']['ticket']['ticketCode'])
-        self.assertIn('eventguest@example.com', response.json()['reservation']['ticket']['qrPayload'])
+        reservation = Reservation.objects.get()
+        self.assertEqual(reservation.ticket_type_ref, self.late)
+        self.assertEqual(reservation.quantity, 3)
+        self.assertEqual(reservation.total_amount, 600000)
 
-    def test_payment_rejects_tampered_ticket_type(self):
-        token = self.authenticated_token()
-        response = self.post_json('/api/payments/initiate/', {
-            'fullName': 'Event Guest',
+        tickets = response.json()['reservation']['tickets']
+        self.assertEqual([ticket['guestName'] for ticket in tickets], ['Event Guest', 'Amina K', 'Sarah N'])
+        self.assertEqual(len({ticket['ticketCode'] for ticket in tickets}), 3)
+        self.assertTrue(all(ticket['ticketCode'].startswith('STM26-LT-') for ticket in tickets))
+
+        qr = json.loads(tickets[1]['qrPayload'])
+        self.assertEqual(qr, {
+            'event': 'Singles to Mingle 2026',
+            'date': '27 November 2026',
+            'ticketType': 'Late Ticket',
+            'name': 'Amina K',
+            'code': tickets[1]['ticketCode'],
+        })
+
+    def test_every_ticket_needs_a_guest_name(self):
+        response = reserve(self.client, self.token, self.early, quantity=2, guest_names=['Event Guest', ' '])
+        self.assertEqual(response.status_code, 400)
+        self.assertFalse(Reservation.objects.exists())
+
+    def test_cannot_reserve_more_than_remaining_capacity(self):
+        mark_paid(reserve(self.client, self.token, self.early, quantity=4, guest_names=['A', 'B', 'C', 'D']).json()['reservation']['id'])
+        response = reserve(self.client, self.token, self.early, quantity=2, guest_names=['E', 'F'])
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('Only 1 ticket left', response.json()['error'])
+
+    def test_ticket_type_from_another_event_is_rejected(self):
+        other_event = Event.objects.create(title='Other', date='2027-01-01', time='18:00', venue='Elsewhere', dress_code='Any', is_active=False)
+        foreign_type = TicketType.objects.create(event=other_event, name='VIP', price=1, code_prefix='OTH-VIP')
+        response = reserve(self.client, self.token, foreign_type)
+        self.assertEqual(response.status_code, 400)
+
+    def test_payment_requires_a_reservation(self):
+        response = post_json(self.client, '/api/payments/initiate/', {
             'phoneNumber': '+256 700 000 000',
-            'ticketType': 'Early Bird — UGX 1',
             'amount': '1',
             'paymentMethod': 'MTN Mobile Money',
-        }, HTTP_AUTHORIZATION=f'Token {token}')
+        }, HTTP_AUTHORIZATION=f'Token {self.token}')
         self.assertEqual(response.status_code, 400)
         self.assertIn('Create a reservation', response.json()['error'])
 
-    @override_settings(
-        PAYMENT_CALLBACK_SECRET='test-callback',
-        EMAIL_BACKEND='django.core.mail.backends.locmem.EmailBackend',
-    )
-    def test_confirmed_payment_sends_ticket_email(self):
-        token = self.authenticated_token()
-        reservation_response = self.post_json('/api/event/reserve/', {
-            'fullName': 'Event Guest',
-            'phone': '+256 700 000 000',
-            'email': 'eventguest@example.com',
-            'ticketType': 'Early Bird — UGX 150,000',
-            'paymentMethod': 'MTN Mobile Money',
-            'paymentPhone': '+256 700 000 000',
-        }, HTTP_AUTHORIZATION=f'Token {token}')
-        reservation = Reservation.objects.get(id=reservation_response.json()['reservation']['id'])
-        reservation.payment_reference = 'MTN-confirmed-payment'
-        reservation.save(update_fields=['payment_reference'])
+    @override_settings(PAYMENT_CALLBACK_SECRET='test-callback', EMAIL_BACKEND='django.core.mail.backends.locmem.EmailBackend')
+    def test_confirmed_payment_emails_every_ticket(self):
+        reservation_id = reserve(self.client, self.token, self.early, quantity=2, guest_names=['Event Guest', 'Amina K']).json()['reservation']['id']
+        Reservation.objects.filter(id=reservation_id).update(payment_reference='MTN-confirmed-payment')
 
-        callback_response = self.post_json('/api/payments/callback/', {
-            'reference': 'MTN-confirmed-payment',
-            'status': 'SUCCESSFUL',
-        }, HTTP_X_PAYMENT_CALLBACK_SECRET='test-callback')
+        callback_response = post_json(self.client, '/api/payments/callback/', {'reference': 'MTN-confirmed-payment', 'status': 'SUCCESSFUL'}, HTTP_X_PAYMENT_CALLBACK_SECRET='test-callback')
 
         self.assertEqual(callback_response.status_code, 200)
-        reservation.refresh_from_db()
+        reservation = Reservation.objects.get(id=reservation_id)
         self.assertEqual(reservation.status, 'paid')
-        self.assertTrue(reservation.ticket_email_sent)
         self.assertEqual(len(mail.outbox), 1)
-        self.assertIn(reservation.ticket_code, mail.outbox[0].body)
+        for ticket in reservation.tickets.all():
+            self.assertIn(ticket.ticket_code, mail.outbox[0].body)
+        self.assertIn('UGX 300,000', mail.outbox[0].body)
 
 
-class AdminApiTests(TestCase):
-    def post_json(self, path, payload, **headers):
-        return self.client.post(path, data=json.dumps(payload), content_type='application/json', **headers)
+class AdminEventTests(TestCase):
+    def setUp(self):
+        self.headers = create_admin_headers(self.client)
 
-    def create_admin(self):
-        response = self.post_json('/api/admin/auth/signup/', {
-            'fullName': 'Site Administrator',
-            'email': 'admin@example.com',
-            'password': 'admin-password',
-        })
-        self.assertEqual(response.status_code, 201)
-        return response.json()['admin']['token']
+    def create_event(self, **overrides):
+        payload = {
+            'title': 'Women Leadership Summit 2027',
+            'date': '2027-02-14',
+            'time': '17:00',
+            'venue': 'Kampala International Convention Centre',
+            'dressCode': 'Elegant Business',
+            'capacity': 120,
+        }
+        payload.update(overrides)
+        return post_json(self.client, '/api/admin/events/', payload, **self.headers)
 
-    def test_dashboard_requires_admin_authentication(self):
-        response = self.client.get('/api/admin/dashboard/')
-        self.assertEqual(response.status_code, 401)
-
-    def test_authenticated_admin_receives_database_dashboard_data(self):
-        token = self.create_admin()
-        member_response = self.post_json('/api/auth/signup/', {
-            'fullName': 'Dashboard Guest',
-            'email': 'guest@example.com',
-            'password': 'secure-password',
-        })
-        member_token = member_response.json()['user']['token']
-        reservation_response = self.post_json('/api/event/reserve/', {
-            'fullName': 'Dashboard Guest',
-            'email': 'guest@example.com',
-            'phone': '+256 700 000 000',
-            'ticketType': 'Early Bird — UGX 150,000',
-            'paymentMethod': 'MTN Mobile Money',
-        }, HTTP_AUTHORIZATION=f'Token {member_token}')
-        reservation = Reservation.objects.get(id=reservation_response.json()['reservation']['id'])
-        reservation.status = 'paid'
-        reservation.save(update_fields=['status'])
-
-        dashboard_response = self.client.get('/api/admin/dashboard/', HTTP_AUTHORIZATION=f'Token {token}')
-        self.assertEqual(dashboard_response.status_code, 200)
-        dashboard = dashboard_response.json()
-        self.assertEqual(dashboard['summary']['paidGuests'], 1)
-        self.assertEqual(dashboard['summary']['revenue'], 'UGX 150,000')
-        self.assertEqual(dashboard['attendees'][0]['email'], 'guest@example.com')
+    def test_admin_endpoints_require_authentication(self):
+        for path in ('/api/admin/dashboard/', '/api/admin/events/', '/api/admin/guests/'):
+            self.assertEqual(self.client.get(path).status_code, 401)
 
     def test_only_one_initial_admin_can_register(self):
-        self.create_admin()
-        response = self.post_json('/api/admin/auth/signup/', {
-            'fullName': 'Second Admin',
-            'email': 'second@example.com',
-            'password': 'admin-password',
-        })
+        response = post_json(self.client, '/api/admin/auth/signup/', {'fullName': 'Second', 'email': 'second@example.com', 'password': 'admin-password'})
         self.assertEqual(response.status_code, 403)
         self.assertEqual(AdminAccount.objects.count(), 1)
 
+    def test_event_requires_time_dress_code_venue_and_date(self):
+        response = self.create_event(time='', dressCode='')
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()['error'], 'Time, Dress code are required.')
 
-class AdminDashboardTests(TestCase):
-    def post_json(self, path, payload, **headers):
-        return self.client.post(path, data=json.dumps(payload), content_type='application/json', **headers)
-
-    def admin_headers(self):
-        response = self.post_json('/api/admin/auth/signup/', {
-            'fullName': 'Dashboard Administrator',
-            'email': 'dashboard-admin@example.com',
-            'password': 'admin-password',
-        })
+    def test_new_event_goes_live_then_gets_ticket_types_with_automatic_prefixes(self):
+        event_id = self.create_event().json()['event']['id']
+        response = post_json(self.client, f'/api/admin/events/{event_id}/ticket-types/', {'name': 'VIP Table', 'price': 'UGX 250,000', 'highlight': True}, **self.headers)
         self.assertEqual(response.status_code, 201)
-        return {'HTTP_AUTHORIZATION': f"Token {response.json()['admin']['token']}"}
+        option = response.json()['event']['ticketOptions'][0]
+        self.assertEqual(option['codePrefix'], 'WLS27-VT')
+        self.assertEqual(option['amount'], 250000)
 
-    def test_admin_can_create_event_and_fetch_dashboard_summary(self):
-        headers = self.admin_headers()
-        response = self.post_json('/api/admin/events/', {
-            'title': 'Women Leadership Summit 2027',
-            'date': '2027-02-14',
-            'venue': 'Kampala International Convention Centre',
-            'time': '5:00 PM',
-            'dressCode': 'Elegant Business',
-            'capacity': 120,
-            'ticketTypes': [
-                {'name': 'VIP', 'price': 'UGX 250,000'},
-                {'name': 'Premium', 'price': 'UGX 180,000'},
-            ],
-        }, **headers)
+        details = self.client.get('/api/event/details/').json()
+        self.assertEqual(details['title'], 'Women Leadership Summit 2027')
+        self.assertEqual(details['date'], '14 February 2027')
+        self.assertEqual(details['time'], '5:00 PM')
 
-        self.assertEqual(response.status_code, 201)
-        self.assertEqual(response.json()['event']['title'], 'Women Leadership Summit 2027')
-
-        dashboard_response = self.client.get('/api/admin/dashboard/', **headers)
-        self.assertEqual(dashboard_response.status_code, 200)
-        self.assertEqual(dashboard_response.json()['event']['title'], 'Women Leadership Summit 2027')
-        self.assertEqual(dashboard_response.json()['summary']['capacity'], 120)
-
-    def test_ticket_validation_returns_paid_guest_details(self):
-        headers = self.admin_headers()
-        member_response = self.post_json('/api/auth/signup/', {
-            'fullName': 'Alice Guest',
-            'email': 'alice@example.com',
-            'password': 'secure-password',
-        })
-        token = member_response.json()['user']['token']
-
-        reservation_response = self.post_json('/api/event/reserve/', {
-            'fullName': 'Alice Guest',
-            'phone': '+256 700 000 000',
-            'email': 'alice@example.com',
-            'ticketType': 'Early Bird — UGX 150,000',
-            'paymentMethod': 'MTN Mobile Money',
-            'paymentPhone': '+256 700 000 000',
-        }, HTTP_AUTHORIZATION=f'Token {token}')
-
-        reservation = Reservation.objects.get(id=reservation_response.json()['reservation']['id'])
-        reservation.status = 'paid'
-        reservation.save(update_fields=['status'])
-
-        validation_response = self.post_json('/api/admin/scanner/validate/', {
-            'ticketCode': reservation.ticket_code,
-        }, **headers)
-
-        self.assertEqual(validation_response.status_code, 200)
-        self.assertEqual(validation_response.json()['guest']['name'], 'Alice Guest')
-        self.assertEqual(validation_response.json()['guest']['status'], 'paid')
-
-    def test_admin_can_edit_and_delete_events(self):
-        headers = self.admin_headers()
-        create_response = self.post_json('/api/admin/events/', {
-            'title': 'Women Leadership Summit 2027',
-            'date': '2027-02-14',
-            'venue': 'Kampala International Convention Centre',
-            'time': '5:00 PM',
-            'dressCode': 'Elegant Business',
-            'capacity': 120,
-            'ticketTypes': [
-                {'name': 'VIP', 'price': 'UGX 250,000'},
-                {'name': 'Premium', 'price': 'UGX 180,000'},
-            ],
-        }, **headers)
-        event_id = create_response.json()['event']['id']
-
-        update_response = self.post_json(f'/api/admin/events/{event_id}/update/', {
-            'title': 'Updated Leadership Summit',
-            'venue': 'Pearl Africa Hotel',
-            'capacity': 150,
-        }, **headers)
-        self.assertEqual(update_response.status_code, 200)
-        self.assertEqual(update_response.json()['event']['title'], 'Updated Leadership Summit')
+    def test_admin_can_edit_and_delete_unsold_events(self):
+        event_id = self.create_event().json()['event']['id']
+        update_response = post_json(self.client, f'/api/admin/events/{event_id}/update/', {'title': 'Updated Summit', 'capacity': 150}, **self.headers)
+        self.assertEqual(update_response.json()['event']['title'], 'Updated Summit')
         self.assertEqual(update_response.json()['event']['capacity'], 150)
 
-        delete_response = self.post_json(f'/api/admin/events/{event_id}/delete/', {}, **headers)
-        self.assertEqual(delete_response.status_code, 200)
+        delete_response = post_json(self.client, f'/api/admin/events/{event_id}/delete/', {}, **self.headers)
         self.assertEqual(delete_response.json()['message'], 'Event deleted successfully.')
 
-    def test_ticket_validation_marks_guest_checked_in(self):
-        headers = self.admin_headers()
-        member_response = self.post_json('/api/auth/signup/', {
-            'fullName': 'Bob Guest',
-            'email': 'bob@example.com',
-            'password': 'secure-password',
-        })
-        token = member_response.json()['user']['token']
-
-        reservation_response = self.post_json('/api/event/reserve/', {
-            'fullName': 'Bob Guest',
-            'phone': '+256 700 000 001',
-            'email': 'bob@example.com',
-            'ticketType': 'Early Bird — UGX 150,000',
-            'paymentMethod': 'MTN Mobile Money',
-            'paymentPhone': '+256 700 000 001',
-        }, HTTP_AUTHORIZATION=f'Token {token}')
-
-        reservation = Reservation.objects.get(id=reservation_response.json()['reservation']['id'])
-        reservation.status = 'paid'
-        reservation.save(update_fields=['status'])
-
-        validation_response = self.post_json('/api/admin/scanner/validate/', {
-            'ticketCode': reservation.ticket_code,
-            'checkIn': True,
-        }, **headers)
-
-        self.assertEqual(validation_response.status_code, 200)
-        self.assertEqual(validation_response.json()['guest']['status'], 'checked_in')
-        reservation.refresh_from_db()
-        self.assertEqual(reservation.status, 'checked_in')
+    def test_events_with_sales_cannot_be_deleted(self):
+        event, early, _ = create_live_event()
+        reserve(self.client, create_member_token(self.client), early)
+        response = post_json(self.client, f'/api/admin/events/{event.id}/delete/', {}, **self.headers)
+        self.assertEqual(response.status_code, 400)
 
 
-class MemberAuthTests(TestCase):
-    def test_signup_and_login_work_for_member_accounts(self):
-        signup_response = self.client.post(
-            '/api/auth/signup/',
-            {'fullName': 'Jane Doe', 'email': 'jane@example.com', 'password': 'secret123'},
-            content_type='application/json',
-        )
+class AdminReportingTests(TestCase):
+    def setUp(self):
+        self.headers = create_admin_headers(self.client)
+        self.event, self.early, self.late = create_live_event()
+        token = create_member_token(self.client)
+        self.paid = mark_paid(reserve(self.client, token, self.late, quantity=2, guest_names=['Event Guest', 'Amina K']).json()['reservation']['id'])
+        reserve(self.client, token, self.early)  # left pending: must not count
 
-        self.assertEqual(signup_response.status_code, 201)
-        signup_data = signup_response.json()
-        self.assertEqual(signup_data['user']['email'], 'jane@example.com')
-        self.assertTrue(signup_data['user']['token'])
+    def test_dashboard_revenue_comes_from_stored_paid_orders(self):
+        # Changing a price afterwards must not rewrite what was already paid.
+        TicketType.objects.filter(id=self.late.id).update(price=999)
+        summary = self.client.get('/api/admin/dashboard/', **self.headers).json()['summary']
+        self.assertEqual(summary['revenue'], 'UGX 400,000')
+        self.assertEqual(summary['ticketsSold'], 2)
+        self.assertEqual(summary['pendingOrders'], 1)
+        self.assertNotIn('paidGuests', summary)
 
-        login_response = self.client.post(
-            '/api/auth/login/',
-            {'email': 'jane@example.com', 'password': 'secret123'},
-            content_type='application/json',
-        )
+    def test_guests_page_lists_paid_orders_with_amount_and_tickets(self):
+        data = self.client.get(f'/api/admin/guests/?event={self.event.id}', **self.headers).json()
+        self.assertEqual(len(data['orders']), 1)
+        order = data['orders'][0]
+        self.assertEqual(order['quantity'], 2)
+        self.assertEqual(order['amountPaid'], 'UGX 400,000')
+        self.assertEqual([ticket['guestName'] for ticket in order['tickets']], ['Event Guest', 'Amina K'])
+        self.assertEqual(data['totals']['tickets'], 2)
 
-        self.assertEqual(login_response.status_code, 200)
-        login_data = login_response.json()
-        self.assertEqual(login_data['user']['email'], 'jane@example.com')
-        self.assertTrue(login_data['user']['token'])
 
-        me_response = self.client.get(
-            '/api/auth/me/',
-            HTTP_AUTHORIZATION=f"Token {login_data['user']['token']}",
-        )
+class ScannerTests(TestCase):
+    def setUp(self):
+        self.headers = create_admin_headers(self.client)
+        self.event, self.early, _ = create_live_event()
+        token = create_member_token(self.client)
+        reservation_id = reserve(self.client, token, self.early, quantity=2, guest_names=['Event Guest', 'Amina K']).json()['reservation']['id']
+        self.reservation = mark_paid(reservation_id)
+        self.first, self.second = self.reservation.tickets.all()
 
-        self.assertEqual(me_response.status_code, 200)
-        me_data = me_response.json()
-        self.assertEqual(me_data['user']['email'], 'jane@example.com')
-        self.assertEqual(me_data['user']['fullName'], 'Jane Doe')
+    def scan(self, code, token=None):
+        return post_json(self.client, f'/api/scanner/{token or self.event.scanner_token}/check-in/', {'code': code})
 
-    def test_logout_invalidates_the_member_token(self):
-        signup_response = self.client.post(
-            '/api/auth/signup/',
-            {'fullName': 'John Smith', 'email': 'john@example.com', 'password': 'secret123'},
-            content_type='application/json',
-        )
+    def test_secret_link_checks_in_each_ticket_once_from_qr_content(self):
+        response = self.scan(self.first.qr_payload)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()['guest']['name'], 'Event Guest')
+        self.assertEqual(response.json()['event']['checkedIn'], 1)
 
-        self.assertEqual(signup_response.status_code, 201)
-        token = signup_response.json()['user']['token']
+        repeat = self.scan(self.first.ticket_code)
+        self.assertEqual(repeat.status_code, 409)
+        self.assertEqual(repeat.json()['result'], 'already_checked_in')
 
-        logout_response = self.client.post(
-            '/api/auth/logout/',
-            HTTP_AUTHORIZATION=f'Token {token}',
-        )
+        self.reservation.refresh_from_db()
+        self.assertEqual(self.reservation.status, 'paid')
+        self.scan(self.second.ticket_code)
+        self.reservation.refresh_from_db()
+        self.assertEqual(self.reservation.status, 'checked_in')
 
-        self.assertEqual(logout_response.status_code, 200)
+    def test_unpaid_and_foreign_tickets_are_refused(self):
+        Reservation.objects.filter(id=self.reservation.id).update(status='pending')
+        self.assertEqual(self.scan(self.first.ticket_code).json()['result'], 'unpaid')
 
-        me_response = self.client.get(
-            '/api/auth/me/',
-            HTTP_AUTHORIZATION=f'Token {token}',
-        )
+        other_event = Event.objects.create(title='Other', date='2027-01-01', time='18:00', venue='Elsewhere', dress_code='Any', is_active=False)
+        self.assertEqual(self.scan(self.first.ticket_code, token=other_event.scanner_token).json()['result'], 'wrong_event')
 
-        self.assertEqual(me_response.status_code, 401)
-        self.assertEqual(me_response.json()['error'], 'Invalid session.')
+    def test_regenerated_link_revokes_the_old_one(self):
+        old_token = self.event.scanner_token
+        response = post_json(self.client, f'/api/admin/events/{self.event.id}/scanner-link/', {}, **self.headers)
+        self.assertNotEqual(response.json()['event']['scannerToken'], old_token)
+        self.assertEqual(self.client.get(f'/api/scanner/{old_token}/').status_code, 404)
+
+    def test_admin_scanner_still_validates_without_checking_in(self):
+        response = post_json(self.client, '/api/admin/scanner/validate/', {'ticketCode': self.first.ticket_code}, **self.headers)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()['guest']['status'], 'paid')
+        self.assertIsNone(Ticket.objects.get(id=self.first.id).checked_in_at)
