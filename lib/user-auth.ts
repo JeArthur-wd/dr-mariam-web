@@ -328,3 +328,60 @@ export async function fetchReservation(reservationId: number) {
 }
 
 
+export type ScanGuest = {
+  name: string
+  buyerName: string
+  ticket: string
+  eventTitle: string
+  status: string
+  ticketCode: string
+  checkedInAt: string | null
+}
+
+export type ScanEvent = {
+  title: string
+  date: string
+  time: string
+  venue: string
+  ticketsSold: number
+  checkedIn: number
+}
+
+export type ScanResponse = {
+  result: 'checked_in' | 'valid' | 'already_checked_in' | 'unpaid' | 'wrong_event' | 'not_found' | 'invalid'
+  message?: string
+  error?: string
+  guest?: ScanGuest
+  event?: ScanEvent
+}
+
+/** Like apiRequest, but scan refusals (404/409/400) carry a result body the scanner shows. */
+export async function scanRequest(path: string, body: Record<string, unknown>, headers: Record<string, string> = {}): Promise<ScanResponse> {
+  const response = await fetch(`${API_URL}${path}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...headers },
+    body: JSON.stringify(body),
+  })
+  const data = (await response.json().catch(() => ({}))) as Partial<ScanResponse>
+  if (!data.result) {
+    throw new Error(data.error || 'The scanner could not reach the server.')
+  }
+  return data as ScanResponse
+}
+
+export async function fetchScannerEvent(token: string) {
+  const data = await apiRequest<{ event: ScanEvent }>(`/api/scanner/${encodeURIComponent(token)}/`, { method: 'GET' })
+  return data.event
+}
+
+export function checkInWithScannerLink(token: string, code: string) {
+  return scanRequest(`/api/scanner/${encodeURIComponent(token)}/check-in/`, { code })
+}
+
+export function checkInAsAdmin(code: string) {
+  const session = readAdminSession()
+  if (!session?.token) {
+    return Promise.reject(new Error('Administrator login required.'))
+  }
+  return scanRequest('/api/admin/scanner/validate/', { ticketCode: code, checkIn: true }, { Authorization: `Token ${session.token}` })
+}
