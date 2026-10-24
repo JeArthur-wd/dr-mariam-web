@@ -38,10 +38,10 @@ export const serviceCards = [
 ] as const
 
 export const books = [
-  { title: 'The Ladies Guide 1', description: 'The essential guide for every lady navigating life and relationships.', price: 'UGX 50,000' },
-  { title: 'The Magic of Gratitude', description: 'Discover the transformative power of a grateful heart.', price: 'UGX 40,000' },
-  { title: 'The Ladies Guide 3 Journal', description: 'A guided journal to help you reflect, grow and heal.', price: 'UGX 60,000' },
-  { title: 'The Ladies Guide 2', description: 'Deeper insights and wisdom for the modern woman.', price: 'UGX 50,000' },
+  { title: 'The Ladies Guide 1', description: 'To fulfilling relationships and true happiness. The essential guide for every lady navigating life and relationships.', price: 'UGX 50,000', image: '/images/book-ladies-guide-1.jpg' },
+  { title: 'The Magic of Gratitude', description: 'The Ladies Guide 4. Discover the transformative power of a grateful heart.', price: 'UGX 40,000', image: '/images/book-magic-of-gratitude.jpg' },
+  { title: 'The Ladies Guide Journal', description: 'A guided journal to help you reflect, grow and heal.', price: 'UGX 60,000', image: '/images/book-ladies-guide-journal.jpg' },
+  { title: 'The Ladies Guide 2', description: 'To emotional happiness. Deeper insights and wisdom for the modern woman.', price: 'UGX 50,000', image: '/images/book-ladies-guide-2.jpg' },
 ] as const
 
 export const products = [

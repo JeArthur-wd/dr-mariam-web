@@ -1,4 +1,3 @@
-import { BookOpenText } from 'lucide-react'
 import { BackLink } from '../../components/back-link'
 import { SiteFooter, SiteHeader } from '../../components/site-shell'
 import { books, whatsappLink } from '../../lib/site-data'
@@ -14,10 +13,12 @@ export default function BooksPage() {
           <h1>Explore our available books</h1>
         </section>
 
-        <section className="resource-grid">
+        <section className="resource-grid books-grid">
           {books.map((book) => (
-            <article key={book.title} className="resource-card">
-              <div className="resource-icon"><BookOpenText size={22} /></div>
+            <article key={book.title} className="resource-card book-card">
+              <div className="book-cover">
+                <img src={book.image} alt={`Cover of ${book.title}`} loading="lazy" />
+              </div>
               <h2>{book.title}</h2>
               <p>{book.description}</p>
               <div className="resource-meta">
