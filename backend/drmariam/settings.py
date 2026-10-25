@@ -35,7 +35,9 @@ SECRET_KEY = 'django-insecure-5d0%l@@#k*^6lbbmq+-0)y9-h3s7m55l+p^+xj&&=4r35cchmh
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
 
-ALLOWED_HOSTS = ['localhost', '127.0.0.1', '[::1]', '0.0.0.0']
+# In development the site is opened from phones on the local network (door scanner),
+# so any host is accepted. Production lists its real domains in DJANGO_ALLOWED_HOSTS.
+ALLOWED_HOSTS = ['*'] if DEBUG else [host.strip() for host in os.getenv('DJANGO_ALLOWED_HOSTS', '').split(',') if host.strip()]
 CORS_ALLOW_ALL_ORIGINS = True
 CORS_ALLOW_CREDENTIALS = True
 CSRF_TRUSTED_ORIGINS = [
@@ -139,6 +141,11 @@ USE_TZ = True
 # https://docs.djangoproject.com/en/6.0/howto/static-files/
 
 STATIC_URL = 'static/'
+
+# Uploaded event images.
+MEDIA_URL = '/media/'
+MEDIA_ROOT = BASE_DIR / 'media'
+MAX_EVENT_IMAGE_BYTES = 5 * 1024 * 1024
 
 # Email is deliberately configured through environment variables so live
 # credentials never enter source control. In development, the console backend

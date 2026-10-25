@@ -158,6 +158,27 @@ class ReservationTests(TestCase):
         for ticket in reservation.tickets.all():
             self.assertIn(ticket.ticket_code, mail.outbox[0].body)
         self.assertIn('UGX 300,000', mail.outbox[0].body)
+        # Sent to the signup email, not the address typed at checkout, with one QR image per guest.
+        self.assertEqual(mail.outbox[0].to, ['guest@example.com'])
+        qr_images = [part for part in mail.outbox[0].attachments if getattr(part, 'get_content_type', lambda: '')() == 'image/png']
+        self.assertEqual(len(qr_images), 2)
+        self.assertIn('cid:ticket-1', mail.outbox[0].alternatives[0][0])
+
+    def test_member_sees_their_own_orders_with_ticket_colour(self):
+        self.early.color = '#123abc'
+        self.early.save(update_fields=['color'])
+        reserve(self.client, self.token, self.early, quantity=2, guest_names=['Event Guest', 'Amina K'])
+        other_token = create_member_token(self.client, 'other@example.com')
+        reserve(self.client, other_token, self.late)
+
+        response = self.client.get('/api/auth/reservations/', HTTP_AUTHORIZATION=f'Token {self.token}')
+        self.assertEqual(response.status_code, 200)
+        orders = response.json()['reservations']
+        self.assertEqual(len(orders), 1)
+        self.assertEqual(orders[0]['ticketColor'], '#123abc')
+        self.assertEqual(orders[0]['eventVenue'], 'Sheraton Hotel')
+        self.assertEqual(len(orders[0]['tickets']), 2)
+        self.assertEqual(self.client.get('/api/auth/reservations/').status_code, 401)
 
 
 class AdminEventTests(TestCase):
@@ -197,6 +218,39 @@ class AdminEventTests(TestCase):
         option = response.json()['event']['ticketOptions'][0]
         self.assertEqual(option['codePrefix'], 'WLS27-VT')
         self.assertEqual(option['amount'], 250000)
+
+    def test_ticket_types_take_a_colour_that_can_be_changed(self):
+        event_id = self.create_event().json()['event']['id']
+        path = f'/api/admin/events/{event_id}/ticket-types/'
+        self.assertEqual(post_json(self.client, path, {'name': 'VIP', 'price': 250000, 'color': 'red'}, **self.headers).status_code, 400)
+        option = post_json(self.client, path, {'name': 'VIP', 'price': 250000, 'color': '#1F7A4D'}, **self.headers).json()['event']['ticketOptions'][0]
+        self.assertEqual(option['color'], '#1f7a4d')
+
+        response = post_json(self.client, f"/api/admin/ticket-types/{option['id']}/update/", {'color': '#222222'}, **self.headers)
+        self.assertEqual(response.json()['event']['ticketOptions'][0]['color'], '#222222')
+
+    def test_admin_can_upload_and_remove_an_event_image(self):
+        import shutil
+        import tempfile
+
+        from django.core.files.uploadedfile import SimpleUploadedFile
+
+        media_root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, media_root, ignore_errors=True)
+        with self.settings(MEDIA_ROOT=media_root):
+            event_id = self.create_event().json()['event']['id']
+            path = f'/api/admin/events/{event_id}/image/'
+            bad = self.client.post(path, {'image': SimpleUploadedFile('notes.txt', b'hello', content_type='text/plain')}, **self.headers)
+            self.assertEqual(bad.status_code, 400)
+
+            image = SimpleUploadedFile('poster.png', b'\x89PNG\r\n\x1a\n' + b'0' * 64, content_type='image/png')
+            response = self.client.post(path, {'image': image}, **self.headers)
+            self.assertEqual(response.status_code, 200)
+            self.assertTrue(response.json()['event']['imageUrl'].startswith('/media/events/event-'))
+            self.assertEqual(self.client.get('/api/event/details/').json()['imageUrl'], response.json()['event']['imageUrl'])
+
+            removed = self.client.post(path, {'remove': 'true'}, **self.headers)
+            self.assertIsNone(removed.json()['event']['imageUrl'])
 
         details = self.client.get('/api/event/details/').json()
         self.assertEqual(details['title'], 'Women Leadership Summit 2027')

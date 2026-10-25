@@ -2,13 +2,13 @@
 
 import { useRouter } from 'next/navigation'
 import { useEffect, useState } from 'react'
-import QRCode from 'qrcode'
 import { CalendarDays, Check, Clock3, MapPin, MessageCircle, Minus, Plus, Shirt, Ticket, X, Zap } from 'lucide-react'
 import { BackLink } from '../../components/back-link'
 import { MobileMoneyMark } from '../../components/mobile-money-mark'
 import { SiteFooter, SiteHeader } from '../../components/site-shell'
+import { DEFAULT_TICKET_COLOR, TicketPass } from '../../components/ticket-pass'
 import { contactLinks, whatsappLink } from '../../lib/site-data'
-import { fetchCurrentMember, fetchEventDetails, fetchReservation, initiatePayment, readSession, reserveTicket, type EventDetails, type MobileMoneyNetwork, type ReservationPayload, type TicketOption, type UserSession } from '../../lib/user-auth'
+import { fetchCurrentMember, fetchEventDetails, fetchReservation, initiatePayment, mediaUrl, readSession, reserveTicket, type EventDetails, type MobileMoneyNetwork, type ReservationPayload, type TicketOption, type UserSession } from '../../lib/user-auth'
 
 const MAX_TICKETS = 10
 const NETWORKS: MobileMoneyNetwork[] = ['MTN Mobile Money', 'Airtel Money']
@@ -29,13 +29,12 @@ export default function EventPage() {
   const [step, setStep] = useState<Step | null>(null)
   const [quantity, setQuantity] = useState(1)
   const [guestNames, setGuestNames] = useState<string[]>([''])
-  const [contact, setContact] = useState({ email: '', phone: '' })
+  const [contact, setContact] = useState({ phone: '' })
   const [network, setNetwork] = useState<MobileMoneyNetwork>('MTN Mobile Money')
   const [paymentPhone, setPaymentPhone] = useState('')
   const [formError, setFormError] = useState('')
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [order, setOrder] = useState<ReservationPayload | null>(null)
-  const [qrCodes, setQrCodes] = useState<Record<string, string>>({})
 
   const ticketOptions = eventData?.ticketOptions ?? []
   const onSale = Boolean(eventData?.id) && ticketOptions.some((option) => option.id !== null)
@@ -91,18 +90,6 @@ export default function EventPage() {
     return () => window.clearInterval(interval)
   }, [order, step])
 
-  useEffect(() => {
-    if (!order || !PAID.includes(order.status)) {
-      setQrCodes({})
-      return
-    }
-    let cancelled = false
-    Promise.all(order.tickets.map(async (ticket) => [ticket.ticketCode, await QRCode.toDataURL(ticket.qrPayload, { width: 360, margin: 1, color: { dark: '#3c1730', light: '#ffffff' } })] as const))
-      .then((entries) => { if (!cancelled) setQrCodes(Object.fromEntries(entries)) })
-      .catch(() => { if (!cancelled) setQrCodes({}) })
-    return () => { cancelled = true }
-  }, [order])
-
   if (checkingAccess || !user) {
     return (
       <div className="site-shell">
@@ -128,7 +115,7 @@ export default function EventPage() {
     if (ticketId !== undefined) setSelectedTicketId(ticketId)
     setQuantity(1)
     setGuestNames([user?.fullName ?? ''])
-    setContact({ email: user?.email ?? '', phone: '' })
+    setContact({ phone: '' })
     setOrder(null)
     setFormError('')
     setStep('details')
@@ -162,7 +149,7 @@ export default function EventPage() {
       if (!activeOrder) {
         const response = await reserveTicket({
           fullName: user.fullName,
-          email: contact.email.trim(),
+          email: user.email,
           phone: contact.phone.trim(),
           ticketTypeId: selectedTicket.id,
           quantity,
@@ -199,7 +186,7 @@ export default function EventPage() {
         <section className="event-layout" aria-label="Event details">
           <div className="poster-wrap">
             <div className="poster-glow" />
-            <img src="/event-poster.jpg" alt={eventData?.title ?? 'Event poster'} className="poster" />
+            <img src={mediaUrl(eventData?.imageUrl) ?? '/event-poster.jpg'} alt={eventData?.title ?? 'Event poster'} className="poster" />
           </div>
           <div className="details-column">
             {eventData ? (
@@ -225,6 +212,7 @@ export default function EventPage() {
                     aria-checked={isSelected}
                     disabled={!onSale}
                     className={`ticket-card ticket-option${ticket.highlight ? ' featured' : ''}${isSelected ? ' selected' : ''}`}
+                    style={{ '--ticket-color': ticket.color || DEFAULT_TICKET_COLOR } as React.CSSProperties}
                     onClick={() => setSelectedTicketId(ticket.id)}
                   >
                     <span className="ticket-badge">
@@ -295,7 +283,7 @@ export default function EventPage() {
                     ))}
                   </fieldset>
 
-                  <label>Email for your tickets<input required type="email" value={contact.email} onChange={(event) => setContact((current) => ({ ...current, email: event.target.value }))} placeholder="you@example.com" /></label>
+                  <p className="ticket-delivery-note">Tickets are emailed to <strong>{user.email}</strong>, the address on your account, as soon as payment is confirmed.</p>
                   <label>Phone number<input required type="tel" inputMode="tel" value={contact.phone} onChange={(event) => setContact((current) => ({ ...current, phone: event.target.value }))} placeholder="+256 700 000 000" /></label>
 
                   <div className="order-total"><span>{quantity} × {selectedTicket.label}</span><strong>{formatUgx(total)}</strong></div>
@@ -334,19 +322,12 @@ export default function EventPage() {
               <div className="success-state">
                 <div className="success-icon"><Check size={28} /></div>
                 <h2 id="reserve-title">{orderPaid ? `Your ticket${order.quantity > 1 ? 's are' : ' is'} confirmed` : 'Approve the payment on your phone'}</h2>
-                <p>{orderPaid ? `We also emailed ${order.quantity > 1 ? 'them' : 'it'} to ${order.email}. Each guest shows their own QR code at the entrance.` : `Enter your PIN to pay ${order.totalAmount}. This page updates as soon as the payment is confirmed.`}</p>
+                <p>{orderPaid ? `We also emailed ${order.quantity > 1 ? 'them' : 'it'} to ${order.email}. Each guest shows their own QR code at the entrance. You can find them any time under My tickets.` : `Enter your PIN to pay ${order.totalAmount}. This page updates as soon as the payment is confirmed, and your tickets are emailed to ${order.email}.`}</p>
 
                 {orderPaid ? (
                   <div className="issued-tickets">
                     {order.tickets.map((ticket) => (
-                      <article key={ticket.ticketCode} className="issued-ticket">
-                        {qrCodes[ticket.ticketCode] ? <img src={qrCodes[ticket.ticketCode]} alt={`QR code for ${ticket.guestName}`} /> : <div className="qr-placeholder" aria-hidden="true" />}
-                        <div>
-                          <strong>{ticket.guestName}</strong>
-                          <span>{order.ticketType}</span>
-                          <code>{ticket.ticketCode}</code>
-                        </div>
-                      </article>
+                      <TicketPass key={ticket.ticketCode} ticket={ticket} ticketType={order.ticketType} color={order.ticketColor} />
                     ))}
                   </div>
                 ) : null}

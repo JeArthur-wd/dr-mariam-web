@@ -1325,3 +1325,73 @@ button.primary-button { border:0; }
   .stat-item { padding:12px 6px; min-width:0; }
   .stat-item strong { font-size:clamp(13px, 3.8vw, 18px); }
 }
+
+/* Member dashboard (reuses the admin sidebar layout) */
+.member-shell .admin-brand { color:inherit; }
+.member-shell .admin-profile-card { display:grid; gap:10px; }
+.member-shell .admin-profile-card .mini-profile { padding:0 0 4px; }
+.member-shell .admin-logout-button { margin-top:0; text-decoration:none; }
+.member-dashboard, .member-tickets { display:grid; gap:22px; }
+.member-welcome { grid-template-columns:1fr; padding:26px 28px; }
+.member-welcome h2 { margin:0; font-size:clamp(28px, 3.4vw, 40px); letter-spacing:-1.2px; color:var(--plum); line-height:1.1; }
+.member-welcome p { margin-top:8px; }
+.member-order-list { list-style:none; margin:0 0 26px; padding:0; display:grid; gap:10px; }
+.member-order-list li { display:flex; justify-content:space-between; align-items:center; gap:14px; padding:14px 16px; background:#fff; border:1px solid var(--line); border-left:6px solid var(--ticket-color, var(--berry)); border-radius:14px; }
+.member-order-list li div { display:grid; gap:3px; min-width:0; }
+.member-order-list strong { color:var(--plum); }
+.member-order-list li div span { color:var(--muted); font-size:13px; }
+.member-event-image { display:block; width:100%; aspect-ratio:4/5; object-fit:cover; border-radius:16px; margin-bottom:14px; border:1px solid var(--line); }
+.member-order-card { border-top:6px solid var(--ticket-color, var(--berry)); display:grid; gap:14px; }
+.member-order-summary { margin:0; color:var(--plum); font-weight:700; }
+.member-ticket-grid { grid-template-columns:repeat(auto-fill, minmax(min(100%, 320px), 1fr)); margin:0; }
+.member-tickets .form-actions { display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap; }
+.member-tickets .form-hint svg { vertical-align:-2px; }
+.status-pill { flex:none; display:inline-flex; align-items:center; padding:5px 11px; border-radius:999px; font-size:12px; font-weight:800; white-space:nowrap; }
+.status-pill.success { background:#effcf4; color:#156b41; border:1px solid #9fdcbb; }
+.status-pill.pending { background:#fff8e6; color:#7f5300; border:1px solid #f0d08a; }
+
+/* Ticket passes and colours */
+.ticket-pass { border-left:8px solid var(--ticket-color, var(--berry)); }
+.ticket-pass-type { justify-self:start; padding:3px 10px; border-radius:999px; background:var(--ticket-color, var(--berry)); color:#fff !important; font-size:11px !important; font-weight:800; letter-spacing:1px; text-transform:uppercase; }
+.ticket-pass-used { display:inline-flex; align-items:center; gap:5px; color:#156b41 !important; font-weight:700; }
+.ticket-option { border-top:6px solid var(--ticket-color, var(--line)); }
+.ticket-option .ticket-badge { color:var(--ticket-color, var(--berry)); }
+.ticket-delivery-note { margin:0; padding:10px 12px; border-radius:10px; background:#fff7fa; border:1px solid var(--line); color:var(--muted); font-size:13px; line-height:1.5; overflow-wrap:anywhere; }
+.ticket-delivery-note strong { color:var(--plum); }
+.ticket-color-field { border:0; margin:0; padding:0; display:grid; gap:8px; }
+.ticket-color-field legend { color:var(--plum); font-size:12px; font-weight:700; margin-bottom:8px; padding:0; }
+.ticket-swatches { display:flex; flex-wrap:wrap; align-items:center; gap:8px; }
+.ticket-swatch { width:32px; height:32px; border-radius:50%; border:2px solid #fff; box-shadow:0 0 0 1px var(--line); cursor:pointer; padding:0; position:relative; overflow:hidden; }
+.ticket-swatch.selected { box-shadow:0 0 0 2px var(--plum); }
+.ticket-swatch.custom { background:conic-gradient(#e7528c, #d97706, #c9a227, #1f7a4d, #2563eb, #6e234e, #e7528c); }
+.ticket-swatch input, .ticket-color-chip input { position:absolute; inset:0; width:100%; height:100%; opacity:0; cursor:pointer; border:0; padding:0; }
+.ticket-color-preview { margin-left:4px; padding:5px 12px; border-radius:999px; color:#fff; font-size:11px; font-weight:800; letter-spacing:1px; max-width:100%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.ticket-type-list li.with-color { grid-template-columns:28px minmax(0, 1fr) auto auto 36px; }
+.ticket-color-chip { position:relative; width:24px; height:24px; border-radius:50%; overflow:hidden; box-shadow:0 0 0 1px var(--line); cursor:pointer; }
+.ticket-color-chip input { opacity:1; transform:scale(2); }
+.scan-banner { flex-wrap:wrap; }
+.scan-ticket-color { flex-basis:100%; margin:0 !important; padding:6px 12px; border-radius:10px; color:#fff; font-size:13px !important; font-weight:800; letter-spacing:1px; text-transform:uppercase; }
+
+/* Event image upload */
+.event-image-field { display:grid; gap:8px; }
+.field-label { color:var(--plum); font-size:12px; font-weight:700; }
+.event-image-picker { display:flex; gap:16px; align-items:flex-start; }
+.event-image-picker > img, .event-image-empty { width:140px; aspect-ratio:4/5; flex:none; border-radius:14px; object-fit:cover; border:1px solid var(--line); }
+.event-image-empty { display:grid; place-content:center; justify-items:center; gap:6px; background:#fff7fa; color:var(--muted); font-size:12px; border-style:dashed; }
+.event-image-actions { display:grid; gap:8px; justify-items:start; }
+.file-button { position:relative; cursor:pointer; display:inline-flex; align-items:center; gap:8px; }
+.file-button input { position:absolute; width:1px; height:1px; opacity:0; pointer-events:none; }
+.file-button:focus-within { outline:2px solid var(--pink); outline-offset:2px; }
+.event-admin-thumb { width:72px; aspect-ratio:4/5; flex:none; border-radius:12px; object-fit:cover; border:1px solid var(--line); }
+.scanner-link-qr { width:200px; height:200px; border-radius:12px; border:1px solid var(--line); background:#fff; }
+.scanner-link-box .form-hint.warning svg { vertical-align:-2px; }
+
+@media (max-width:720px) {
+  .ticket-type-list li.with-color { grid-template-columns:28px 1fr auto; }
+  .member-order-list li { flex-direction:column; align-items:flex-start; }
+}
+@media (max-width:480px) {
+  .event-image-picker { flex-direction:column; }
+  .event-image-picker > img, .event-image-empty { width:100%; max-width:220px; }
+  .member-welcome { padding:22px 18px; }
+}

@@ -5,7 +5,14 @@ export const ADMIN_SESSION_KEY = 'drmariam-admin-session'
 export const ADMIN_ACCOUNTS_KEY = 'drmariam-admin-accounts'
 export const ADMIN_SESSION_EVENT = 'drmariam-admin-session-changed'
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
+// Empty by default: requests go to this site and next.config.mjs forwards them to Django.
+const API_URL = (process.env.NEXT_PUBLIC_API_URL || '').replace(/\/$/, '')
+
+/** Uploaded files come back as '/media/...' paths served by Django. */
+export function mediaUrl(path: string | null | undefined) {
+  if (!path) return null
+  return /^https?:/.test(path) ? path : `${API_URL}${path}`
+}
 
 export type UserSession = {
   fullName: string
@@ -20,6 +27,7 @@ export type TicketOption = {
   amount: number
   highlight: boolean
   codePrefix?: string
+  color?: string
   sold?: number
 }
 
@@ -30,6 +38,7 @@ export type EventDetails = {
   venue: string
   time: string
   dressCode: string
+  imageUrl?: string | null
   capacity?: number
   ticketsRemaining?: number
   ticketOptions: TicketOption[]
@@ -54,9 +63,15 @@ export type ReservationPayload = {
   fullName: string
   email: string
   eventTitle: string
+  eventDate: string
+  eventTime: string
+  eventVenue: string
+  eventImageUrl: string | null
   ticketType: string
+  ticketColor: string
   quantity: number
   totalAmount: string
+  createdAt: string
   status: 'pending' | 'paid' | 'confirmed' | 'checked_in' | 'failed'
   paymentMethod: string
   emailSent: boolean
@@ -327,11 +342,60 @@ export async function fetchReservation(reservationId: number) {
   })
 }
 
+export async function fetchMyReservations() {
+  const session = readSession()
+  if (!session?.token) {
+    throw new Error('Member login required to view your tickets.')
+  }
+
+  const data = await apiRequest<{ reservations: ReservationPayload[] }>('/api/auth/reservations/', {
+    method: 'GET',
+    headers: {
+      Authorization: `Token ${session.token}`,
+    },
+  })
+  return data.reservations
+}
+
+export async function resendTicketEmail(reservationId: number) {
+  const session = readSession()
+  if (!session?.token) {
+    throw new Error('Member login required.')
+  }
+
+  return apiRequest<{ emailSent: boolean; reservation: ReservationPayload }>(`/api/event/reservations/${reservationId}/send-ticket/`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Token ${session.token}`,
+    },
+  })
+}
+
+/** Multipart upload for admins; the browser sets the multipart Content-Type itself. */
+export async function adminUpload<T>(path: string, form: FormData): Promise<T> {
+  const session = readAdminSession()
+  if (!session?.token) {
+    throw new Error('Administrator login required.')
+  }
+
+  const response = await fetch(`${API_URL}${path}`, {
+    method: 'POST',
+    headers: { Authorization: `Token ${session.token}` },
+    body: form,
+  })
+  const data = await response.json().catch(() => ({}))
+  if (!response.ok) {
+    const errorData = data as { error?: string }
+    throw new Error(errorData.error || 'The upload failed.')
+  }
+  return data as T
+}
 
 export type ScanGuest = {
   name: string
   buyerName: string
   ticket: string
+  ticketColor?: string
   eventTitle: string
   status: string
   ticketCode: string

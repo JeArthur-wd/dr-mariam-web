@@ -4,11 +4,17 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { CheckCircle2, CircleAlert, QrCode, ScanLine, ShieldAlert } from 'lucide-react'
 import type { ScanEvent, ScanResponse } from '../lib/user-auth'
 
-type ScanOutcome = { tone: 'success' | 'warning' | 'danger'; title: string; detail: string }
+type ScanOutcome = { tone: 'success' | 'warning' | 'danger'; title: string; detail: string; color?: string; ticket?: string }
 
 const SAME_CODE_COOLDOWN_MS = 4000
 
 function describe(response: ScanResponse): ScanOutcome {
+  const outcome = describeResult(response)
+  // The ticket colour lets door staff confirm the ticket type at a glance.
+  return response.guest ? { ...outcome, color: response.guest.ticketColor, ticket: response.guest.ticket } : outcome
+}
+
+function describeResult(response: ScanResponse): ScanOutcome {
   const guest = response.guest
   const who = guest ? `${guest.name} · ${guest.ticket}` : ''
   switch (response.result) {
@@ -152,6 +158,7 @@ export function TicketScanner({ onScan, event }: TicketScannerProps) {
 
       <aside className="scanner-sidebar">
         <div className={`scan-banner ${outcome ? outcome.tone : 'idle'}`} role="status" aria-live="assertive">
+          {outcome?.color ? <span className="scan-ticket-color" style={{ background: outcome.color }}>{outcome.ticket}</span> : null}
           {outcome ? (
             <>
               <OutcomeIcon size={30} />

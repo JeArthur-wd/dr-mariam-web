@@ -5,6 +5,9 @@ import uuid
 from django.db import models
 
 
+DEFAULT_TICKET_COLOR = '#b82b6c'
+
+
 def generate_member_token() -> str:
     return uuid.uuid4().hex
 
@@ -64,6 +67,7 @@ class Event(models.Model):
     early_ticket_price = models.CharField(max_length=50, default='UGX 150,000')
     late_ticket_label = models.CharField(max_length=100, default='Late Ticket')
     late_ticket_price = models.CharField(max_length=50, default='UGX 200,000')
+    image = models.FileField(upload_to='events/', blank=True, default='')
     scanner_token = models.CharField(max_length=64, unique=True, default=generate_scanner_token)
     is_active = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -81,6 +85,7 @@ class TicketType(models.Model):
     price = models.PositiveIntegerField()
     code_prefix = models.CharField(max_length=24)
     highlight = models.BooleanField(default=False)
+    color = models.CharField(max_length=7, default=DEFAULT_TICKET_COLOR)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:

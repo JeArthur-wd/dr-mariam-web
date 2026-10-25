@@ -1,7 +1,9 @@
 import base64
+import io
 import json
 import logging
 import os
+import re
 import uuid
 from datetime import datetime
 from html import escape
@@ -9,7 +11,9 @@ from typing import Any
 from urllib import error as urllib_error
 from urllib import parse as urllib_parse
 from urllib import request as urllib_request
+from email.message import MIMEPart
 
+import segno
 from django.conf import settings
 from django.contrib.auth.hashers import check_password, make_password
 from django.core.mail import EmailMultiAlternatives
@@ -21,12 +25,14 @@ from rest_framework import status
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
 
-from .models import AdminAccount, Event, Member, Reservation, Ticket, TicketType, build_code_prefix
+from .models import DEFAULT_TICKET_COLOR, AdminAccount, Event, Member, Reservation, Ticket, TicketType, build_code_prefix
 
 logger = logging.getLogger(__name__)
 
 PAID_STATUSES = {'paid', 'confirmed', 'checked_in'}
 MAX_TICKETS_PER_ORDER = 10
+HEX_COLOR = re.compile(r'^#[0-9a-fA-F]{6}$')
+EVENT_IMAGE_TYPES = {'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp', 'image/gif': 'gif'}
 
 DEFAULT_EVENT = {
     'title': 'Singles to Mingle 2026',
@@ -64,6 +70,20 @@ def format_event_time(value: str) -> str:
         return datetime.strptime(value.strip(), '%H:%M').strftime('%I:%M %p').lstrip('0')
     except ValueError:
         return value
+
+
+def read_color(value: Any) -> str | None:
+    """Accept '#a1b2c3' style colours from the admin colour picker."""
+    color = str(value or '').strip()
+    return color.lower() if HEX_COLOR.match(color) else None
+
+
+def event_image_url(event: Event | None) -> str | None:
+    return event.image.url if event and event.image else None
+
+
+def ticket_color(reservation: Reservation) -> str:
+    return reservation.ticket_type_ref.color if reservation.ticket_type_ref else DEFAULT_TICKET_COLOR
 
 
 def read_token(request) -> str:
@@ -121,6 +141,7 @@ def serialize_ticket_type(ticket_type: TicketType) -> dict[str, Any]:
         'amount': ticket_type.price,
         'highlight': ticket_type.highlight,
         'codePrefix': ticket_type.code_prefix,
+        'color': ticket_type.color,
     }
 
 
@@ -129,6 +150,7 @@ def serialize_event(event: Event | None) -> dict[str, Any]:
         default_event = DEFAULT_EVENT.copy()
         default_event['capacity'] = 200
         default_event['id'] = None
+        default_event['imageUrl'] = None
         return default_event
 
     return {
@@ -140,6 +162,7 @@ def serialize_event(event: Event | None) -> dict[str, Any]:
         'time': format_event_time(event.time),
         'timeValue': event.time,
         'dressCode': event.dress_code,
+        'imageUrl': event_image_url(event),
         'capacity': event.capacity,
         'ticketsRemaining': max(event.capacity - paid_tickets(event).count(), 0),
         'ticketOptions': [serialize_ticket_type(ticket_type) for ticket_type in event.ticket_types.all()],
@@ -210,9 +233,15 @@ def serialize_reservation(reservation: Reservation) -> dict[str, Any]:
         'fullName': reservation.full_name,
         'email': reservation.email,
         'eventTitle': reservation.event.title if reservation.event else '',
+        'eventDate': format_event_date(reservation.event.date) if reservation.event else '',
+        'eventTime': format_event_time(reservation.event.time) if reservation.event else '',
+        'eventVenue': reservation.event.venue if reservation.event else '',
+        'eventImageUrl': event_image_url(reservation.event),
         'ticketType': reservation.ticket_type_ref.name if reservation.ticket_type_ref else reservation.ticket_type,
+        'ticketColor': ticket_color(reservation),
         'quantity': reservation.quantity,
         'totalAmount': format_ugx(reservation.total_amount),
+        'createdAt': reservation.created_at.isoformat(),
         'status': reservation.status,
         'paymentMethod': reservation.payment_method,
         'emailSent': reservation.ticket_email_sent,
@@ -233,6 +262,7 @@ def serialize_guest_order(reservation: Reservation) -> dict[str, Any]:
         'phone': reservation.phone,
         'eventTitle': reservation.event.title if reservation.event else '',
         'ticketType': reservation.ticket_type_ref.name if reservation.ticket_type_ref else reservation.ticket_type,
+        'ticketColor': ticket_color(reservation),
         'quantity': reservation.quantity,
         'amountPaid': format_ugx(reservation.total_amount),
         'amountValue': reservation.total_amount,
@@ -244,14 +274,21 @@ def serialize_guest_order(reservation: Reservation) -> dict[str, Any]:
     }
 
 
+def ticket_qr_png(payload: str) -> bytes:
+    buffer = io.BytesIO()
+    segno.make(payload, error='m').save(buffer, kind='png', scale=8, border=2, dark='#3c1730')
+    return buffer.getvalue()
+
+
 def send_ticket_email(reservation: Reservation) -> bool:
-    """Deliver event tickets only after a payment has been confirmed."""
+    """Deliver event tickets, with a QR code per guest, only after a payment has been confirmed."""
     if reservation.status not in PAID_STATUSES or reservation.ticket_email_sent:
         return reservation.ticket_email_sent
 
     details = serialize_event(reservation.event or live_event())
     tickets = list(reservation.tickets.all())
     ticket_type = reservation.ticket_type_ref.name if reservation.ticket_type_ref else reservation.ticket_type
+    color = ticket_color(reservation)
     subject = f"Your ticket{'s' if len(tickets) > 1 else ''} for {details['title']}"
     ticket_lines = '\n'.join(f'- {ticket.guest_name}: {ticket.ticket_code}' for ticket in tickets) or f'- {reservation.full_name}: {reservation.ticket_code}'
     text_body = (
@@ -261,25 +298,39 @@ def send_ticket_email(reservation: Reservation) -> bool:
         f"Venue: {details['venue']}\nTime: {details['time']}\n"
         f"Ticket type: {ticket_type} x {reservation.quantity}\n\n"
         f"Tickets:\n{ticket_lines}\n\n"
-        "Each guest presents their own ticket code or QR code at the entrance."
+        "Each guest's QR code is attached. Show it, or the ticket code, at the entrance."
     )
-    ticket_items = ''.join(
-        f'<li><strong>{escape(ticket.guest_name)}</strong>: {escape(ticket.ticket_code)}</li>' for ticket in tickets
+    ticket_cards = ''.join(
+        f'<table role="presentation" cellpadding="0" cellspacing="0" style="width:100%;max-width:460px;margin:0 0 14px;border:1px solid #f0d8e4;border-left:8px solid {color};border-radius:14px;">'
+        f'<tr><td style="padding:14px;width:150px;"><img src="cid:ticket-{index}" width="140" height="140" alt="QR code for {escape(ticket.guest_name)}" style="display:block;"></td>'
+        f'<td style="padding:14px 14px 14px 0;font-family:Arial,sans-serif;color:#3c1730;">'
+        f'<span style="display:inline-block;padding:3px 10px;border-radius:999px;background:{color};color:#fff;font-size:11px;font-weight:bold;letter-spacing:1px;">{escape(ticket_type.upper())}</span>'
+        f'<p style="margin:10px 0 4px;font-size:17px;font-weight:bold;">{escape(ticket.guest_name)}</p>'
+        f'<p style="margin:0;font-family:Consolas,monospace;font-size:13px;color:#a72968;">{escape(ticket.ticket_code)}</p></td></tr></table>'
+        for index, ticket in enumerate(tickets)
     )
     html_body = (
-        f"<h2>Your tickets are confirmed</h2><p>Hello {escape(reservation.full_name)},</p>"
+        '<div style="font-family:Arial,sans-serif;color:#3c1730;">'
+        f'<h2 style="color:#6e234e;">Your tickets are confirmed</h2><p>Hello {escape(reservation.full_name)},</p>'
         f"<p>Your payment of {escape(format_ugx(reservation.total_amount))} has been confirmed for "
         f"<strong>{escape(details['title'])}</strong>.</p>"
         f"<p><strong>Date:</strong> {escape(details['date'])}<br>"
         f"<strong>Venue:</strong> {escape(details['venue'])}<br>"
         f"<strong>Time:</strong> {escape(details['time'])}<br>"
         f"<strong>Ticket type:</strong> {escape(ticket_type)} &times; {reservation.quantity}</p>"
-        f"<ul>{ticket_items}</ul>"
-        "<p>Each guest presents their own ticket code or QR code at the entrance.</p>"
+        f"{ticket_cards}"
+        "<p>Each guest shows their own QR code, or the ticket code, at the entrance.</p></div>"
     )
     try:
         message = EmailMultiAlternatives(subject, text_body, settings.DEFAULT_FROM_EMAIL, [reservation.email])
         message.attach_alternative(html_body, 'text/html')
+        for index, ticket in enumerate(tickets):
+            image = MIMEPart()
+            image.set_content(
+                ticket_qr_png(ticket.qr_payload or ticket.ticket_code), maintype='image', subtype='png',
+                disposition='inline', filename=f'{ticket.ticket_code}.png', cid=f'<ticket-{index}>',
+            )
+            message.attach(image)
         message.send(fail_silently=False)
     except Exception:
         logger.exception('Unable to send ticket email for reservation %s', reservation.id)
@@ -314,6 +365,7 @@ def check_in_ticket(raw_code: str, event: Event | None = None, commit: bool = Tr
         'buyerName': reservation.full_name,
         'email': reservation.email,
         'ticket': reservation.ticket_type_ref.name if reservation.ticket_type_ref else reservation.ticket_type,
+        'ticketColor': ticket_color(reservation),
         'eventTitle': reservation.event.title if reservation.event else '',
         'status': reservation.status,
         'amount': format_ugx(reservation.unit_price),
@@ -423,6 +475,21 @@ def logout_member(request):
     return Response({'message': 'Logged out successfully.'})
 
 
+@api_view(['GET'])
+def member_reservations(request):
+    """The signed-in member's orders and tickets, newest first, for their dashboard."""
+    member = authenticated_member(request)
+    if member is None:
+        return Response({'error': 'Authentication required.'}, status=status.HTTP_401_UNAUTHORIZED)
+    reservations = (
+        member.reservations.exclude(status='failed')
+        .select_related('event', 'ticket_type_ref')
+        .prefetch_related('tickets')
+        .order_by('-created_at')
+    )
+    return Response({'reservations': [serialize_reservation(reservation) for reservation in reservations]})
+
+
 @api_view(['POST'])
 @csrf_exempt
 def signup_admin(request):
@@ -482,13 +549,14 @@ def event_details(request):
     return Response(serialize_event(live_event()))
 
 
-def _create_ticket_type(event: Event, name: str, price: int, highlight: bool) -> TicketType:
+def _create_ticket_type(event: Event, name: str, price: int, highlight: bool, color: str | None = None) -> TicketType:
     return TicketType.objects.create(
         event=event,
         name=name,
         price=price,
         code_prefix=build_code_prefix(event.title, name),
         highlight=highlight,
+        color=color or DEFAULT_TICKET_COLOR,
     )
 
 
@@ -538,7 +606,7 @@ def admin_events(request):
             name = str((ticket or {}).get('name') or '').strip()
             price = parse_amount((ticket or {}).get('price'))
             if name and price:
-                _create_ticket_type(event, name, price, highlight=index == 0)
+                _create_ticket_type(event, name, price, highlight=index == 0, color=read_color((ticket or {}).get('color')))
 
     return Response({'message': 'Event created. Now add its ticket types.', 'event': serialize_admin_event(event)}, status=status.HTTP_201_CREATED)
 
@@ -577,8 +645,40 @@ def delete_event(request, event_id: int):
     if event.reservations.exists():
         return Response({'error': 'This event already has reservations, so it cannot be deleted.'}, status=status.HTTP_400_BAD_REQUEST)
 
+    if event.image:
+        event.image.delete(save=False)
     event.delete()
     return Response({'message': 'Event deleted successfully.'})
+
+
+@api_view(['POST'])
+@csrf_exempt
+def event_image(request, event_id: int):
+    """Upload (multipart field 'image') or, with remove=true, clear an event's poster image."""
+    if not authenticated_admin(request):
+        return Response(ADMIN_REQUIRED, status=status.HTTP_401_UNAUTHORIZED)
+    event = Event.objects.filter(id=event_id).first()
+    if event is None:
+        return Response({'error': 'Event not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+    if str(request.data.get('remove') or '').lower() == 'true':
+        if event.image:
+            event.image.delete(save=True)
+        return Response({'message': 'Event image removed.', 'event': serialize_admin_event(event)})
+
+    upload = request.FILES.get('image')
+    if upload is None:
+        return Response({'error': 'Choose an image to upload.'}, status=status.HTTP_400_BAD_REQUEST)
+    extension = EVENT_IMAGE_TYPES.get(upload.content_type or '')
+    if extension is None:
+        return Response({'error': 'Upload a JPG, PNG, WebP or GIF image.'}, status=status.HTTP_400_BAD_REQUEST)
+    if upload.size > settings.MAX_EVENT_IMAGE_BYTES:
+        return Response({'error': 'The image must be 5 MB or smaller.'}, status=status.HTTP_400_BAD_REQUEST)
+
+    if event.image:
+        event.image.delete(save=False)
+    event.image.save(f'event-{event.id}-{uuid.uuid4().hex[:8]}.{extension}', upload, save=True)
+    return Response({'message': 'Event image saved.', 'event': serialize_admin_event(event)})
 
 
 @api_view(['POST'])
@@ -596,9 +696,30 @@ def create_ticket_type(request, event_id: int):
         return Response({'error': 'Ticket name and a price above zero are required.'}, status=status.HTTP_400_BAD_REQUEST)
     if event.ticket_types.filter(name__iexact=name).exists():
         return Response({'error': f'This event already has a "{name}" ticket.'}, status=status.HTTP_400_BAD_REQUEST)
+    color = request.data.get('color')
+    if color and read_color(color) is None:
+        return Response({'error': 'Pick a ticket colour like #b82b6c.'}, status=status.HTTP_400_BAD_REQUEST)
 
-    _create_ticket_type(event, name, price, highlight=bool(request.data.get('highlight')))
+    _create_ticket_type(event, name, price, highlight=bool(request.data.get('highlight')), color=read_color(color))
     return Response({'message': 'Ticket type added.', 'event': serialize_admin_event(event)}, status=status.HTTP_201_CREATED)
+
+
+@api_view(['POST'])
+@csrf_exempt
+def update_ticket_type(request, ticket_type_id: int):
+    """Change a ticket type's colour; safe after sales because the colour is display-only."""
+    if not authenticated_admin(request):
+        return Response(ADMIN_REQUIRED, status=status.HTTP_401_UNAUTHORIZED)
+    ticket_type = TicketType.objects.select_related('event').filter(id=ticket_type_id).first()
+    if ticket_type is None:
+        return Response({'error': 'Ticket type not found.'}, status=status.HTTP_404_NOT_FOUND)
+    color = read_color(request.data.get('color'))
+    if color is None:
+        return Response({'error': 'Pick a ticket colour like #b82b6c.'}, status=status.HTTP_400_BAD_REQUEST)
+
+    ticket_type.color = color
+    ticket_type.save(update_fields=['color'])
+    return Response({'message': 'Ticket colour updated.', 'event': serialize_admin_event(ticket_type.event)})
 
 
 @api_view(['POST'])
@@ -1053,7 +1174,8 @@ def reserve_ticket(request):
         return Response({'error': 'Invalid session.'}, status=status.HTTP_401_UNAUTHORIZED)
 
     full_name = (request.data.get('fullName') or member.full_name).strip()
-    email = (request.data.get('email') or member.email).strip().lower()
+    # Tickets always go to the email the member signed up with.
+    email = member.email
     phone = (request.data.get('phone') or '').strip()
     payment_method = (request.data.get('paymentMethod') or request.data.get('gateway') or 'MTN Mobile Money').strip()
     payment_phone = (request.data.get('paymentPhone') or '').strip()
